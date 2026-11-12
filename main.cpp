@@ -166,12 +166,16 @@ static bool blocksPath(GameObject* o, float margin) {
 // ---- click effects ----
 struct Ev { std::string type; CCPoint pos; float t; std::string mode; bool mini; bool up; };
 struct Run { int presses = 0; std::vector<CCPoint> pts; std::vector<Ev> evs; };   // one playtest attempt: route + click effects
-struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; bool up; };
+struct Span { float l, r; };
+struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; bool up; Span sp; };
 static std::vector<Ev> g_events;
 
 // ---- room check: the X range a gimmick will occupy is computed BEFORE it is pasted ----
-struct Span { float l, r; };
 static std::vector<Span> g_reserved;   // X ranges of gimmicks that are queued / pasted in this run
+static void releaseReserved(Span s) {
+    for (size_t i = 0; i < g_reserved.size(); i++) if (g_reserved[i].l == s.l && g_reserved[i].r == s.r) { g_reserved.erase(g_reserved.begin() + i); return; }
+}
+static void dbgNote(std::string const& s);
 static Span gimmickSpan(Gimmick const& g, CCPoint e0, float stretch) {
     float l = e0.x + g.off.x - 15.f;                                       // leftmost object (a block is 30 wide)
     float r = e0.x + g.off.x + (g.x1 - g.x0) * stretch + 15.f;             // rightmost object
@@ -214,6 +218,7 @@ static float nowSeconds() {
     return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
 }
 static bool debugOn() { return Mod::get()->getSettingValue<bool>("debug"); }
+static void dbgNote(std::string const& s) { if (debugOn()) Notification::create(s, NotificationIcon::Warning, 1.2f)->show(); }
 
 // Vertical motion is measured as a SLOPE (dy per dx) between two consecutive updates. That does not depend on the
 // time step, the frame rate or the game speed: a jump / orb kicks the slope up by a lot in one step, gravity only
@@ -257,7 +262,7 @@ static std::string detectEffect(PlayerObject* pl) {
     return type;
 }
 
-static bool routeMatches(Gimmick const& g, CCPoint e0, float tol, bool curUp) {
+static bool routeMatches(Gimmick const& g, CCPoint e0, float tol, bool curUp, float* outAvg = nullptr, float* outMax = nullptr, int* outN = nullptr) {
     if (g.route.size() < 3) return false;
     float s = curUp ? -1.f : 1.f;   // compare in gravity-relative terms
     int n = 0; float sum = 0.f, mx = 0.f;
@@ -269,7 +274,10 @@ static bool routeMatches(Gimmick const& g, CCPoint e0, float tol, bool curUp) {
         float d = std::fabs(it->y - ry);
         sum += d; mx = std::max(mx, d); n++;
     }
+    if (outN) *outN = n;
     if (n < 5) return false;
+    if (outAvg) *outAvg = sum / n;
+    if (outMax) *outMax = mx;
     return sum / n <= tol && mx <= tol * 3.f;
 }
 
@@ -326,23 +334,24 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
         for (size_t k = 0; k < n; k++) if (g_events[off + k].type != g.types[k]) { ok = false; break; }
         if (!ok) continue;
         auto& first = g_events[off];
-        if (first.mode != g.mode || first.mini != g.mini) continue;
-        if (g_events.back().t - first.t > window) continue;
-        if (first.pos.x - g_lastPlacedX < gap) continue;
+        if (first.mode != g.mode || first.mini != g.mini) { dbgNote(fmt::format("Gimmick #{} not used: mode differs (saved {}{}, now {}{})", i + 1, g.mode, g.mini ? " mini" : "", first.mode, first.mini ? " mini" : "")); continue; }
+        if (g_events.back().t - first.t > window) { dbgNote(fmt::format("Gimmick #{} not used: effects took longer than the Effect window", i + 1)); continue; }
+        if (first.pos.x - g_lastPlacedX < gap) { dbgNote(fmt::format("Gimmick #{} not used: too close to the previous gimmick (Minimum gap)", i + 1)); continue; }
         if (first.pos.x >= g.x0 - g.off.x - 20.f && first.pos.x <= g.x1 + 60.f) continue;   // that is the original gimmick itself
         if (n > best) { best = n; cands.clear(); }
         if (n == best) cands.push_back(i);
     }
-    if (cands.empty() || rnd() > chance) return;
+    if (cands.empty()) return;
+    if (rnd() > chance) { dbgNote("Gimmick not used: Paste chance said no"); return; }
     size_t idx = cands[static_cast<size_t>(rnd() * cands.size()) % cands.size()];
     auto& g = g_gimmicks[idx];
     auto first = g_events[g_events.size() - g.types.size()];
     float stretch = Mod::get()->getSettingValue<bool>("stretch") ? 0.9f + 0.2f * rnd() : 1.f;
     float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
     Span sp = gimmickSpan(g, first.pos, stretch);
-    for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) return;   // too close to another gimmick of this run
+    for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) { dbgNote(fmt::format("Gimmick #{} not used: would overlap another gimmick of this run", idx + 1)); return; }
     g_reserved.push_back(sp);
-    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f, first.up});
+    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f, first.up, sp});
     g_lastPlacedX = first.pos.x;
     g_events.clear();
 }
@@ -387,8 +396,17 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     float lead = static_cast<float>(Mod::get()->getSettingValue<double>("lead-in"));
     std::vector<Ev> evs;
     for (auto& e : run->evs) if (e.pos.x >= minX - lead && e.pos.x <= maxX) evs.push_back(e);
+    // Nothing inside the lead-in range: the effect that STARTED this trajectory (the fall that ends on the block, the
+    // jump that began further back, ...) is the latest effect before the objects, so use that one.
+    float usedBack = 0.f;
     if (evs.empty()) {
-        FLAlertLayer::create("Layout Placer", fmt::format("Your latest route through these objects has no click effect (jump, gravity flip, wave hold/release, ship hold) from {:.0f} units before the first object up to the last one.\n\nClicks seen in that run: {}. Raise \"Lead-in\" in the settings if your click happened earlier.", lead, run->presses).c_str(), "OK")->show();
+        float maxBack = std::max(600.f, lead);
+        Ev const* best = nullptr;
+        for (auto& e : run->evs) if (e.pos.x < minX - lead && e.pos.x >= minX - maxBack && (!best || e.pos.x > best->pos.x)) best = &e;
+        if (best) { evs.push_back(*best); usedBack = minX - best->pos.x; }
+    }
+    if (evs.empty()) {
+        FLAlertLayer::create("Layout Placer", fmt::format("Your latest route through these objects has no click effect (jump, gravity flip, wave hold/release, ship hold, fall) within {:.0f} units before the first object, or inside the objects.\n\nIn that run: {} click(s), {} effect(s) in total.", std::max(600.f, lead), run->presses, run->evs.size()).c_str(), "OK")->show();
         return;
     }
 
@@ -413,7 +431,7 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     size_t nEff = g.types.size();
     g_gimmicks.push_back(std::move(g));
     storeGimmicks();
-    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as gimmick #{} together with your latest route ({} click effect(s)).\n\nIt is pasted automatically when your click effects and route match this route.", count, g_gimmicks.size(), nEff).c_str(), "OK")->show();
+    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as gimmick #{} together with your latest route ({} effect(s){}).\n\nIt is pasted automatically when your effects and route match this route.", count, g_gimmicks.size(), nEff, usedBack > 0.f ? fmt::format(", started {:.0f} units before the objects", usedBack) : std::string()).c_str(), "OK")->show();
 }
 
 static void onPlayerPress(PlayerObject* pl) {
@@ -460,8 +478,11 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             auto p = g_pending[i];
             g_pending.erase(g_pending.begin() + i);
             if (p.idx >= g_gimmicks.size()) continue;
-            if (!routeMatches(g_gimmicks[p.idx], p.at, tol, p.up)) {
-                Notification::create("Gimmick skipped: your route differs from the saved route", NotificationIcon::Warning, 1.f)->show();
+            float dAvg = 0.f, dMax = 0.f; int dN = 0;
+            if (!routeMatches(g_gimmicks[p.idx], p.at, tol, p.up, &dAvg, &dMax, &dN)) {
+                releaseReserved(p.sp);
+                if (dN < 5) Notification::create(fmt::format("Gimmick #{} skipped: too little of your route overlaps the saved route ({} points)", p.idx + 1, dN), NotificationIcon::Warning, 1.5f)->show();
+                else Notification::create(fmt::format("Gimmick #{} skipped: route differs (avg {:.0f} / max {:.0f}, allowed {:.0f} / {:.0f})", p.idx + 1, dAvg, dMax, tol, tol * 3.f), NotificationIcon::Warning, 1.5f)->show();
                 continue;
             }
             {
@@ -469,7 +490,8 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
                 Span sp = gimmickSpan(g_gimmicks[p.idx], p.at, p.stretch);
                 float gap = nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco"));
                 if (gap < spacing) {
-                    Notification::create(fmt::format("Gimmick skipped: not enough room (nearest object {:.0f} units away, need {:.0f})", gap, spacing), NotificationIcon::Warning, 1.f)->show();
+                    releaseReserved(p.sp);
+                    Notification::create(fmt::format("Gimmick #{} skipped: not enough room (nearest object {:.0f} units away, need {:.0f})", p.idx + 1, gap, spacing), NotificationIcon::Warning, 1.5f)->show();
                     continue;
                 }
             }
