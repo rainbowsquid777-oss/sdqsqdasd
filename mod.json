@@ -5,7 +5,7 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.9.0",
+	"version": "v1.11.0",
 	"developer": "user",
 	"description": "Place objects during editor playtest; save gimmicks together with your latest playtest route, and paste them automatically when your click effects and route match the saved route.",
 	"tags": [
@@ -77,6 +77,12 @@
 			"description": "Randomly stretch or squeeze a pasted gimmick horizontally (80% to 120%). Off = pasted exactly as saved.",
 			"type": "bool",
 			"default": false
+		},
+		"predict-orbs": {
+			"name": "Place orbs ahead",
+			"description": "While you fall along a route that looks like the start of a saved gimmick, place its orb ahead of you and wait. If you click it the gimmick goes on; if you do not, you fly past and the orb is removed.",
+			"type": "bool",
+			"default": true
 		},
 		"show-generated": {
 			"name": "Show generated objects",

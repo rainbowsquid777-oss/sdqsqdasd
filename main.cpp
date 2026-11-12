@@ -58,6 +58,7 @@ struct Gimmick {
     CCPoint off = ccp(0.f, 0.f);      // leftmost object relative to the first click effect (y is gravity-relative)
     std::vector<CCPoint> route;       // saved route (player centre) relative to the first effect (y is gravity-relative)
     std::string data;
+    mutable int hasOrb = -1;          // cache: does the gimmick contain a click-activated object (orb)?
 };
 static std::vector<Gimmick> g_gimmicks;
 
@@ -167,7 +168,29 @@ static bool blocksPath(GameObject* o, float margin) {
 struct Ev { std::string type; CCPoint pos; float t; std::string mode; bool mini; bool up; };
 struct Run { int presses = 0; std::vector<CCPoint> pts; std::vector<Ev> evs; };   // one playtest attempt: route + click effects
 struct Span { float l, r; };
-struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; bool up; Span sp; };
+struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; bool up; Span sp; std::vector<Ref<GameObject>> early; };
+
+// Click-activated objects (orbs). These are pasted IMMEDIATELY at the click; the rest of the gimmick follows after the route check.
+static bool isOrbId(int id) {
+    switch (id) {
+        case 36: case 84: case 141: case 1022: case 1330: case 1333: case 1704: case 1751: case 1594: case 3004: return true;
+        default: return false;
+    }
+}
+static bool isClickObject(GameObject* o) { return isOrbId(o->m_objectID); }
+static bool gimmickHasOrb(Gimmick const& g) {
+    if (g.hasOrb >= 0) return g.hasOrb == 1;
+    g.hasOrb = 0;
+    for (auto& obj : splitStr(g.data, ';')) {
+        auto f = splitStr(obj, ',');
+        for (size_t i = 0; i + 1 < f.size(); i += 2) if (f[i] == "1" && isOrbId(std::atoi(f[i + 1].c_str()))) { g.hasOrb = 1; return true; }
+    }
+    return false;
+}
+// An orb placed AHEAD of the player while he is falling along a route that looks like the start of a saved gimmick.
+// If he clicks it, the gimmick goes on as usual; if he does not, he simply flies past and the orb is taken back.
+struct Pred { size_t idx; CCPoint at; float stretch; bool up; Span sp; std::vector<Ref<GameObject>> early; };
+static std::vector<Pred> g_pred;
 static std::vector<Ev> g_events;
 
 // ---- room check: the X range a gimmick will occupy is computed BEFORE it is pasted ----
@@ -182,13 +205,14 @@ static Span gimmickSpan(Gimmick const& g, CCPoint e0, float stretch) {
     return {l, r};
 }
 // X distance from the span to the nearest other object of the level (0 = overlapping in X).
-static float nearestObjectGap(LevelEditorLayer* lel, Span s, bool withDeco) {
+static float nearestObjectGap(LevelEditorLayer* lel, Span s, bool withDeco, std::vector<Ref<GameObject>> const* skip = nullptr) {
     float best = 1e9f;
     auto objs = lel->m_objects;
     if (!objs) return best;
     for (unsigned i = 0; i < objs->count(); i++) {
         auto o = static_cast<GameObject*>(objs->objectAtIndex(i));
         if (!o) continue;
+        if (skip && std::any_of(skip->begin(), skip->end(), [o](Ref<GameObject> const& r) { return r.data() == o; })) continue;
         if (!withDeco && o->m_objectType == GameObjectType::Decoration) continue;
         CCRect r = o->getObjectRect();
         float gap = std::max(r.getMinX() - s.r, s.l - r.getMaxX());
@@ -281,7 +305,8 @@ static bool routeMatches(Gimmick const& g, CCPoint e0, float tol, bool curUp, fl
     return sum / n <= tol && mx <= tol * 3.f;
 }
 
-static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, float stretch, bool curUp) {
+// phase 1 = only the click-activated objects (orbs), phase 2 = everything except them, 0 = everything.
+static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, float stretch, bool curUp, int phase = 0, std::vector<Ref<GameObject>>* keptOut = nullptr) {
     if (!lel->m_editorUI) return 0;
     auto arr = lel->createObjectsFromString(g.data, true, false);
     if (!arr || arr->count() == 0) return 0;
@@ -303,16 +328,42 @@ static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, flo
         if (flip) lel->m_editorUI->transformObject(o, EditCommand::FlipY, false);
         lel->m_editorUI->moveObject(o, target - o->getPosition());
     }
+    if (phase != 0) {
+        std::vector<GameObject*> keep;
+        for (auto o : objs) {
+            bool click = isClickObject(o);
+            if ((phase == 1) == click) keep.push_back(o);
+            else {
+                g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& r) { return r.data() == o; }), g_created.end());
+                lel->removeObject(o, true);
+            }
+        }
+        objs = keep;
+    }
     float margin = static_cast<float>(Mod::get()->getSettingValue<double>("safety-margin"));
     std::vector<GameObject*> bad;
-    for (auto o : objs) if (blocksPath(o, margin)) bad.push_back(o);
+    if (phase != 1) for (auto o : objs) if (blocksPath(o, margin)) bad.push_back(o);
     for (auto o : bad) {
         g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& r) { return r.data() == o; }), g_created.end());
         lel->removeObject(o, true);
     }
-    for (auto o : objs) if (std::find(bad.begin(), bad.end(), o) == bad.end()) g_created.push_back(o);
+    for (auto o : objs) if (std::find(bad.begin(), bad.end(), o) == bad.end()) {
+        g_created.push_back(o);
+        if (keptOut) keptOut->push_back(o);
+    }
     return static_cast<int>(bad.size());
 }
+
+static void removeList(LevelEditorLayer* lel, std::vector<Ref<GameObject>>& list) {
+    for (auto& r : list) {
+        GameObject* o = r.data();
+        if (!o) continue;
+        g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& q) { return q.data() == o; }), g_created.end());
+        if (lel) lel->removeObject(o, true);
+    }
+    list.clear();
+}
+static void removeEarly(LevelEditorLayer* lel, Pending& p) { removeList(lel, p.early); }
 
 static void onEffect(PlayerObject* pl, std::string const& type) {
     Ev ev{type, pl->getPosition(), g_time, modeOf(pl), isMini(pl), pl->m_isUpsideDown};
@@ -345,6 +396,20 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
         if (n == best) cands.push_back(i);
     }
     if (cands.empty()) return;
+    // An orb was already placed ahead of you for this gimmick and you clicked it: keep it and carry on with that gimmick.
+    for (size_t pi = 0; pi < g_pred.size(); pi++) {
+        auto& pr = g_pred[pi];
+        if (std::find(cands.begin(), cands.end(), pr.idx) == cands.end()) continue;
+        auto& pg = g_gimmicks[pr.idx];
+        auto pf = g_events[g_events.size() - pg.types.size()];
+        if (std::fabs(pf.pos.x - (pr.at.x + pg.off.x)) > 70.f) continue;
+        Pending np{pr.idx, pr.at, pr.stretch, pr.at.x + pg.off.x + pg.width * pr.stretch + 60.f, pr.up, pr.sp, std::move(pr.early)};
+        g_pending.push_back(std::move(np));
+        g_pred.erase(g_pred.begin() + pi);
+        g_lastPlacedX = pf.pos.x;
+        g_events.clear();
+        return;
+    }
     if (rnd() > chance) { dbgNote("Gimmick not used: Paste chance said no"); return; }
     size_t idx = cands[static_cast<size_t>(rnd() * cands.size()) % cands.size()];
     auto& g = g_gimmicks[idx];
@@ -354,9 +419,71 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     Span sp = gimmickSpan(g, first.pos, stretch);
     for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) { dbgNote(fmt::format("Gimmick #{} not used: would overlap another gimmick of this run", idx + 1)); return; }
     g_reserved.push_back(sp);
-    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f, first.up, sp});
+    Pending np{idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f, first.up, sp, {}};
+    // Orbs go in right now, at the click, so they work immediately. The rest is pasted after you pass the gimmick (route check).
+    if (auto lel = LevelEditorLayer::get()) {
+        if (nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco")) >= spacing)
+            pasteGimmick(lel, g, first.pos, stretch, first.up, 1, &np.early);
+    }
+    g_pending.push_back(std::move(np));
     g_lastPlacedX = first.pos.x;
     g_events.clear();
+}
+
+static void tryPredict(LevelEditorLayer* lel, PlayerObject* pl) {
+    if (!Mod::get()->getSettingValue<bool>("auto-paste") || !Mod::get()->getSettingValue<bool>("predict-orbs")) return;
+    if (!g_falling || !g_pred.empty() || g_pts.size() < 8) return;
+    std::string mode = modeOf(pl); bool mini = isMini(pl); bool up = pl->m_isUpsideDown;
+    CCPoint cur = pl->getPosition();
+    std::vector<CCPoint> win;   // the last ~90 units of your fall
+    for (size_t i = g_pts.size(); i-- > 0;) {
+        if (cur.x - g_pts[i].x > 90.f || win.size() >= 60) break;
+        win.push_back(g_pts[i]);
+    }
+    if (win.size() < 6 || cur.x - win.back().x < 30.f) return;
+    float tol = static_cast<float>(Mod::get()->getSettingValue<double>("route-tolerance"));
+    float gap = static_cast<float>(Mod::get()->getSettingValue<double>("min-gap"));
+    float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
+    float chance = static_cast<float>(Mod::get()->getSettingValue<double>("chance"));
+    float sg = up ? -1.f : 1.f;
+    size_t bestIdx = static_cast<size_t>(-1); float bestAvg = 1e9f; CCPoint bestE0;
+    for (size_t i = 0; i < g_gimmicks.size(); i++) {
+        auto& g = g_gimmicks[i];
+        if (!g.verified || g.types.empty() || g.types[0] != "kick" || g.mode != mode || g.mini != mini || g.route.size() < 3) continue;
+        if (!gimmickHasOrb(g)) continue;
+        for (size_t k = 0; k < g.route.size(); k++) {
+            float rxk = g.route[k].x;
+            if (rxk > -60.f) break;   // the orb must still be at least 60 units ahead of you
+            CCPoint e0 = ccp(cur.x - rxk, cur.y - sg * g.route[k].y);
+            int n = 0; float sum = 0.f, mx = 0.f;
+            for (auto& w : win) {
+                float rx = w.x - e0.x, ry = sg * (w.y - e0.y);
+                if (rx < g.route.front().x || rx > g.route.back().x) continue;
+                auto it = std::lower_bound(g.route.begin(), g.route.end(), rx, [](CCPoint const& a, float v) { return a.x < v; });
+                if (it == g.route.end()) continue;
+                float d = std::fabs(it->y - ry);
+                sum += d; mx = std::max(mx, d); n++;
+            }
+            if (n < 6) continue;
+            float avg = sum / n;
+            if (avg <= tol && mx <= tol * 3.f && avg < bestAvg) { bestAvg = avg; bestIdx = i; bestE0 = e0; }
+        }
+    }
+    if (bestIdx == static_cast<size_t>(-1)) return;
+    auto& g = g_gimmicks[bestIdx];
+    if (bestE0.x >= g.x0 - g.off.x - 20.f && bestE0.x <= g.x1 + 60.f) return;   // that is the original gimmick itself
+    if (bestE0.x - g_lastPlacedX < gap) return;
+    if (rnd() > chance) { g_pred.push_back({bestIdx, bestE0, 1.f, up, {0.f, 0.f}, {}}); g_pred.back().idx = static_cast<size_t>(-1); return; }   // remember the "no" for this fall
+    float stretch = Mod::get()->getSettingValue<bool>("stretch") ? 0.9f + 0.2f * rnd() : 1.f;
+    Span sp = gimmickSpan(g, bestE0, stretch);
+    for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) return;
+    if (nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco")) < spacing) return;
+    Pred pr{bestIdx, bestE0, stretch, up, sp, {}};
+    pasteGimmick(lel, g, bestE0, stretch, up, 1, &pr.early);
+    if (pr.early.empty()) return;
+    g_reserved.push_back(sp);
+    g_pred.push_back(std::move(pr));
+    if (debugOn()) Notification::create("orb placed ahead - click it or fly past", NotificationIcon::None, 0.8f)->show();
 }
 
 static void saveSelectionAsGimmick(EditorUI* ui) {
@@ -460,7 +587,7 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
         g_newRunPending = false;
         if (g_cur.pts.size() >= 5) { g_runs.push_back(std::move(g_cur)); if (g_runs.size() > 6) g_runs.erase(g_runs.begin()); }
         g_cur = Run{};
-        g_events.clear(); g_pending.clear(); g_reserved.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
+        g_events.clear(); for (auto& pp : g_pending) removeEarly(lel, pp); g_pending.clear(); for (auto& pr : g_pred) removeList(lel, pr.early); g_pred.clear(); g_reserved.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
         g_havePrevState = false; g_pendPress = g_pendRelease = false;
     }
     g_lastX = x;
@@ -474,16 +601,27 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
     }
     auto type = detectEffect(pl);
     if (!type.empty()) onEffect(pl, type);
+    // Orbs placed ahead that you flew past without clicking: take them back.
+    for (size_t i = 0; i < g_pred.size();) {
+        auto& pr = g_pred[i];
+        bool dead = pr.idx == static_cast<size_t>(-1) ? !g_falling : (pr.idx >= g_gimmicks.size() || x > pr.at.x + g_gimmicks[pr.idx].off.x + 60.f);
+        if (dead) {
+            if (pr.idx != static_cast<size_t>(-1)) { releaseReserved(pr.sp); removeList(lel, pr.early); }
+            g_pred.erase(g_pred.begin() + i);
+        } else i++;
+    }
+    tryPredict(lel, pl);
 
     float tol = static_cast<float>(Mod::get()->getSettingValue<double>("route-tolerance"));
     for (size_t i = 0; i < g_pending.size();) {
         if (x > g_pending[i].releaseX) {
-            auto p = g_pending[i];
+            auto p = std::move(g_pending[i]);
             g_pending.erase(g_pending.begin() + i);
-            if (p.idx >= g_gimmicks.size()) continue;
+            if (p.idx >= g_gimmicks.size()) { removeEarly(lel, p); continue; }
             float dAvg = 0.f, dMax = 0.f; int dN = 0;
             if (!routeMatches(g_gimmicks[p.idx], p.at, tol, p.up, &dAvg, &dMax, &dN)) {
                 releaseReserved(p.sp);
+                removeEarly(lel, p);
                 if (dN < 5) Notification::create(fmt::format("Gimmick #{} skipped: too little of your route overlaps the saved route ({} points)", p.idx + 1, dN), NotificationIcon::Warning, 1.5f)->show();
                 else Notification::create(fmt::format("Gimmick #{} skipped: route differs (avg {:.0f} / max {:.0f}, allowed {:.0f} / {:.0f})", p.idx + 1, dAvg, dMax, tol, tol * 3.f), NotificationIcon::Warning, 1.5f)->show();
                 continue;
@@ -491,14 +629,15 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             {
                 float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
                 Span sp = gimmickSpan(g_gimmicks[p.idx], p.at, p.stretch);
-                float gap = nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco"));
+                float gap = nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco"), &p.early);
                 if (gap < spacing) {
                     releaseReserved(p.sp);
+                    removeEarly(lel, p);
                     Notification::create(fmt::format("Gimmick #{} skipped: not enough room (nearest object {:.0f} units away, need {:.0f})", p.idx + 1, gap, spacing), NotificationIcon::Warning, 1.5f)->show();
                     continue;
                 }
             }
-            int removed = pasteGimmick(lel, g_gimmicks[p.idx], p.at, p.stretch, p.up);
+            int removed = pasteGimmick(lel, g_gimmicks[p.idx], p.at, p.stretch, p.up, p.early.empty() ? 0 : 2);
             Notification::create(removed ? fmt::format("Gimmick pasted ({} object(s) left out: they touched your route)", removed) : std::string("Gimmick pasted"), NotificationIcon::Success, 1.f)->show();
         } else i++;
     }
@@ -558,7 +697,11 @@ class $modify(PlacerEditorUI, EditorUI) {
     void keepGeneratedVisible(float) {
         auto lel = LevelEditorLayer::get();
         bool playing = lel && lel->m_playbackMode == PlaybackMode::Playing;
-        if (!playing && g_wasPlaying) g_newRunPending = true;   // playtest ended: the next one starts a new attempt
+        if (!playing && g_wasPlaying) {   // playtest ended: the next one starts a new attempt
+            g_newRunPending = true;
+            for (auto& pp : g_pending) removeEarly(lel, pp);   // gimmicks that were never confirmed: take their orbs back
+            g_pending.clear(); for (auto& pr : g_pred) removeList(lel, pr.early); g_pred.clear(); g_reserved.clear();
+        }
         g_wasPlaying = playing;
         if (!playing) return;
         if (!Mod::get()->getSettingValue<bool>("show-generated")) return;
