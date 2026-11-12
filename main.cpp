@@ -4,6 +4,7 @@
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
+#include <algorithm>
 #include <random>
 #include <sstream>
 using namespace geode::prelude;
@@ -108,16 +109,42 @@ static std::vector<Click> g_clicks;
 static std::vector<Pending> g_pending;
 static float g_time = 0.f, g_lastPlacedX = -1e9f, g_lastX = 0.f;
 
+// Route of the player: one rectangle per frame (hitbox swept from the previous frame, so fast waves leave no gaps).
+static std::vector<CCRect> g_path;
+static CCRect g_prevRect;
+static bool g_hasPrev = false;
+
+// Current hitbox: normal 30, mini 0.6x, wave is a much smaller square (10, mini wave 6).
+static CCRect playerRect(PlayerObject* p) {
+    float size = (p->m_isDart ? 10.f : 30.f) * p->m_vehicleSize;
+    auto pos = p->getPosition();
+    return CCRect(pos.x - size / 2.f, pos.y - size / 2.f, size, size);
+}
+static CCRect rectUnion(CCRect const& a, CCRect const& b) {
+    float x0 = std::min(a.getMinX(), b.getMinX()), y0 = std::min(a.getMinY(), b.getMinY());
+    float x1 = std::max(a.getMaxX(), b.getMaxX()), y1 = std::max(a.getMaxY(), b.getMaxY());
+    return CCRect(x0, y0, x1 - x0, y1 - y0);
+}
+// Solid blocks, slopes and hazards that touch the route would make the recorded clicks impossible.
+static bool blocksPath(GameObject* o, float margin) {
+    auto t = o->m_objectType;
+    if (t != GameObjectType::Solid && t != GameObjectType::Hazard && t != GameObjectType::Slope) return false;
+    CCRect r = o->getObjectRect();
+    r.origin.x -= margin; r.origin.y -= margin; r.size.width += margin * 2.f; r.size.height += margin * 2.f;
+    for (auto& p : g_path) if (p.intersectsRect(r)) return true;
+    return false;
+}
+
 static char const* modeOf(PlayerObject* p) {
     if (p->m_isShip) return "ship";   if (p->m_isBall) return "ball";   if (p->m_isBird) return "ufo";
     if (p->m_isDart) return "wave";   if (p->m_isRobot) return "robot"; if (p->m_isSpider) return "spider";
     if (p->m_isSwing) return "swing"; return "cube";
 }
 
-static void pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint at, float stretch) {
-    if (!lel->m_editorUI) return;
+static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint at, float stretch) {
+    if (!lel->m_editorUI) return 0;
     auto arr = lel->createObjectsFromString(g.data, true, false);
-    if (!arr || arr->count() == 0) return;
+    if (!arr || arr->count() == 0) return 0;
     GameObject* anchor = nullptr;
     for (unsigned i = 0; i < arr->count(); i++) {
         auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
@@ -130,8 +157,22 @@ static void pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint at, fl
         CCPoint p = o->getPosition();
         CCPoint target = ccp(at.x + (p.x - a.x) * stretch, at.y + (p.y - a.y));
         lel->m_editorUI->moveObject(o, target - p);
-        g_created.push_back(o);
     }
+    float margin = static_cast<float>(Mod::get()->getSettingValue<double>("safety-margin"));
+    std::vector<GameObject*> bad;
+    for (unsigned i = 0; i < arr->count(); i++) {
+        auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
+        if (blocksPath(o, margin)) bad.push_back(o);
+    }
+    for (auto o : bad) {
+        g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& r) { return r.data() == o; }), g_created.end());
+        lel->removeObject(o, true);
+    }
+    for (unsigned i = 0; i < arr->count(); i++) {
+        auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
+        if (std::find(bad.begin(), bad.end(), o) == bad.end()) g_created.push_back(o);
+    }
+    return static_cast<int>(bad.size());
 }
 
 static void onPlayerClick(PlayerObject* pl) {
@@ -170,11 +211,20 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
     if (!lel || lel->m_playbackMode != PlaybackMode::Playing || pl != lel->m_player1) return;
     g_time += dt;
     float x = pl->getPositionX();
-    if (x < g_lastX - 100.f) { g_clicks.clear(); g_pending.clear(); g_lastPlacedX = -1e9f; } // restart / checkpoint
+    if (x < g_lastX - 100.f) { g_clicks.clear(); g_pending.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_hasPrev = false; } // restart / checkpoint
     g_lastX = x;
+    {
+        CCRect cur = playerRect(pl);
+        g_path.push_back(g_hasPrev ? rectUnion(g_prevRect, cur) : cur);
+        g_prevRect = cur; g_hasPrev = true;
+        if (g_path.size() > 40000) g_path.erase(g_path.begin(), g_path.begin() + 20000);
+    }
     for (size_t i = 0; i < g_pending.size();) {
         if (x > g_pending[i].releaseX) {
-            if (g_pending[i].idx < g_gimmicks.size()) { pasteGimmick(lel, g_gimmicks[g_pending[i].idx], g_pending[i].at, g_pending[i].stretch); Notification::create("Gimmick pasted", NotificationIcon::Success, 0.8f)->show(); }
+            if (g_pending[i].idx < g_gimmicks.size()) {
+                int removed = pasteGimmick(lel, g_gimmicks[g_pending[i].idx], g_pending[i].at, g_pending[i].stretch);
+                Notification::create(removed ? fmt::format("Gimmick pasted ({} object(s) left out: they touched your route)", removed) : std::string("Gimmick pasted"), NotificationIcon::Success, 1.f)->show();
+            }
             g_pending.erase(g_pending.begin() + i);
         } else i++;
     }

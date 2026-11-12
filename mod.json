@@ -5,7 +5,7 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.2.0",
+	"version": "v1.3.0",
 	"developer": "user",
 	"description": "Place objects during editor playtest, save gimmicks that get pasted automatically, and keep generated objects visible.",
 	"tags": [
@@ -86,6 +86,14 @@
 			"description": "During a playtest, keep every object created along the path visible.",
 			"type": "bool",
 			"default": true
+		},
+		"safety-margin": {
+			"name": "Safety margin (units)",
+			"description": "Blocks and spikes of a pasted gimmick that come closer than this to your route (with your current hitbox: normal, mini, wave, mini wave) are left out.",
+			"type": "float",
+			"default": 3.0,
+			"min": 0.0,
+			"max": 30.0
 		}
 	}
 }
