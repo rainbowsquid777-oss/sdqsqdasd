@@ -3,7 +3,6 @@
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/modify/EditorUI.hpp>
 #include <Geode/modify/LevelEditorLayer.hpp>
-#include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 #include <random>
 #include <sstream>
@@ -217,21 +216,17 @@ class $modify(TrackLevelEditor, LevelEditorLayer) {
     }
 };
 
-class $modify(KeepVisible, GJBaseGameLayer) {
-    void updateVisibility(float dt) {
-        GJBaseGameLayer::updateVisibility(dt);
-        auto lel = LevelEditorLayer::get();
-        if (lel && static_cast<GJBaseGameLayer*>(lel) == this && lel->m_playbackMode == PlaybackMode::Playing &&
-            Mod::get()->getSettingValue<bool>("show-generated")) {
-            for (auto& o : g_created) if (o) o->setVisible(true);
-        }
-    }
-};
-
 // Button in the editor that opens this mod's settings.
 class $modify(PlacerEditorUI, EditorUI) {
+    void keepGeneratedVisible(float) {
+        auto lel = LevelEditorLayer::get();
+        if (!lel || lel->m_playbackMode != PlaybackMode::Playing) return;
+        if (!Mod::get()->getSettingValue<bool>("show-generated")) return;
+        for (auto& o : g_created) if (o) o->setVisible(true);
+    }
     bool init(LevelEditorLayer* editorLayer) {
         if (!EditorUI::init(editorLayer)) return false;
+        this->schedule(schedule_selector(PlacerEditorUI::keepGeneratedVisible));
         auto size = CCDirector::get()->getWinSize();
         auto spr = ButtonSprite::create("Placer");
         spr->setScale(0.6f);
