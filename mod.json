@@ -5,9 +5,9 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.3.0",
+	"version": "v1.4.0",
 	"developer": "user",
-	"description": "Place objects during editor playtest, save gimmicks that get pasted automatically, and keep generated objects visible.",
+	"description": "Place objects during editor playtest; save gimmicks, verify them by playtesting, and paste them automatically when your click effects and route match the tested route.",
 	"tags": [
 		"editor",
 		"utility"
@@ -21,31 +21,6 @@
 			"min": -300.0,
 			"max": 600.0
 		},
-		"new-clicks": {
-			"name": "New gimmick: clicks",
-			"description": "How many clicks the gimmick you save with G belongs to (1 to 10).",
-			"type": "int",
-			"default": 1,
-			"min": 1,
-			"max": 10
-		},
-		"new-mode": {
-			"name": "New gimmick: gamemode",
-			"description": "Gamemode the gimmick you save with G is used in.",
-			"type": "string",
-			"default": "any",
-			"one-of": [
-				"any",
-				"cube",
-				"ship",
-				"ball",
-				"ufo",
-				"wave",
-				"robot",
-				"spider",
-				"swing"
-			]
-		},
 		"auto-paste": {
 			"name": "Auto paste gimmicks",
 			"type": "bool",
@@ -53,12 +28,12 @@
 			"description": "Paste saved gimmicks during a playtest when your clicks match."
 		},
 		"window": {
-			"name": "Click window (seconds)",
-			"description": "All clicks of a gimmick must happen within this time.",
+			"name": "Effect window (seconds)",
+			"description": "All click effects of a gimmick must happen within this time.",
 			"type": "float",
-			"default": 1.0,
+			"default": 2.0,
 			"min": 0.2,
-			"max": 3.0
+			"max": 8.0
 		},
 		"chance": {
 			"name": "Paste chance",
@@ -94,6 +69,14 @@
 			"default": 3.0,
 			"min": 0.0,
 			"max": 30.0
+		},
+		"route-tolerance": {
+			"name": "Route tolerance (units)",
+			"description": "How closely your route must match the tested route of a gimmick (average vertical difference).",
+			"type": "float",
+			"default": 10.0,
+			"min": 2.0,
+			"max": 60.0
 		}
 	}
 }
