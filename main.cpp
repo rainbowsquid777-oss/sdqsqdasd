@@ -1,6 +1,10 @@
 #include <Geode/Geode.hpp>
 #include <Geode/modify/CCKeyboardDispatcher.hpp>
 #include <Geode/modify/PlayerObject.hpp>
+#include <Geode/modify/EditorUI.hpp>
+#include <Geode/modify/LevelEditorLayer.hpp>
+#include <Geode/modify/GJBaseGameLayer.hpp>
+#include <Geode/ui/GeodeUI.hpp>
 #include <random>
 #include <sstream>
 using namespace geode::prelude;
@@ -36,6 +40,9 @@ static void announce(char const* prefix) {
     Notification::create(fmt::format("{}: {}", prefix, ITEMS[g_sel].name), NotificationIcon::None, 0.8f)->show();
 }
 
+
+// Every object created while an editor playtest is running (by this mod or by other mods such as Auto Layout).
+static std::vector<Ref<GameObject>> g_created;
 
 // ---------------- Gimmicks ----------------
 // Select objects in the editor and press G: they are saved as a gimmick for N clicks (settings).
@@ -113,6 +120,7 @@ static void pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint at, fl
         CCPoint p = o->getPosition();
         CCPoint target = ccp(at.x + (p.x - a.x) * stretch, at.y + (p.y - a.y));
         lel->m_editorUI->moveObject(o, target - p);
+        g_created.push_back(o);
     }
 }
 
@@ -180,6 +188,7 @@ class $modify(PlacerKeys, CCKeyboardDispatcher) {
         if (down && !repeat) {
             auto lel = LevelEditorLayer::get();
             if (lel && lel->m_playbackMode != PlaybackMode::Playing) {
+                g_created.clear();
                 if (key == KEY_G) saveSelectionAsGimmick(lel);
                 else if (key == KEY_H) { g_gimmicks.clear(); storeGimmicks(); Notification::create("All gimmicks cleared", NotificationIcon::None, 0.8f)->show(); }
             }
@@ -190,11 +199,48 @@ class $modify(PlacerKeys, CCKeyboardDispatcher) {
                     auto p = lel->m_player1->getPosition();
                     p.x += static_cast<float>(Mod::get()->getSettingValue<double>("offset-x"));
                     if (ITEMS[g_sel].pad) p.y -= 9.f;
-                    lel->createObject(ITEMS[g_sel].id, p, false);
+                    if (auto o = lel->createObject(ITEMS[g_sel].id, p, false)) g_created.push_back(o);
                     announce("Placed");
                 }
             }
         }
         return CCKeyboardDispatcher::dispatchKeyboardMSG(key, down, repeat, timestamp);
+    }
+};
+
+// Track everything created during a playtest and keep it visible.
+class $modify(TrackLevelEditor, LevelEditorLayer) {
+    GameObject* createObject(int id, CCPoint pos, bool undo) {
+        auto o = LevelEditorLayer::createObject(id, pos, undo);
+        if (o && m_playbackMode == PlaybackMode::Playing && g_created.size() < 20000) g_created.push_back(o);
+        return o;
+    }
+};
+
+class $modify(KeepVisible, GJBaseGameLayer) {
+    void updateVisibility(float dt) {
+        GJBaseGameLayer::updateVisibility(dt);
+        auto lel = LevelEditorLayer::get();
+        if (lel && static_cast<GJBaseGameLayer*>(lel) == this && lel->m_playbackMode == PlaybackMode::Playing &&
+            Mod::get()->getSettingValue<bool>("show-generated")) {
+            for (auto& o : g_created) if (o) o->setVisible(true);
+        }
+    }
+};
+
+// Button in the editor that opens this mod's settings.
+class $modify(PlacerEditorUI, EditorUI) {
+    bool init(LevelEditorLayer* editorLayer) {
+        if (!EditorUI::init(editorLayer)) return false;
+        auto size = CCDirector::get()->getWinSize();
+        auto spr = ButtonSprite::create("Placer");
+        spr->setScale(0.6f);
+        auto btn = CCMenuItemExt::createSpriteExtra(spr, [](CCObject*) { openSettingsPopup(Mod::get()); });
+        auto menu = CCMenu::create();
+        menu->setPosition(ccp(0.f, 0.f));
+        btn->setPosition(ccp(40.f, size.height - 110.f));
+        menu->addChild(btn);
+        this->addChild(menu, 100);
+        return true;
     }
 };

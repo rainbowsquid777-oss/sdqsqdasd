@@ -5,9 +5,9 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.1.0",
+	"version": "v1.2.0",
 	"developer": "user",
-	"description": "Place objects during editor playtest, and save gimmicks that get pasted automatically when your clicks match.",
+	"description": "Place objects during editor playtest, save gimmicks that get pasted automatically, and keep generated objects visible.",
 	"tags": [
 		"editor",
 		"utility"
@@ -80,6 +80,12 @@
 			"description": "Randomly stretch or squeeze a pasted gimmick horizontally (80% to 120%). Off = pasted exactly as saved.",
 			"type": "bool",
 			"default": false
+		},
+		"show-generated": {
+			"name": "Show generated objects",
+			"description": "During a playtest, keep every object created along the path visible.",
+			"type": "bool",
+			"default": true
 		}
 	}
 }
