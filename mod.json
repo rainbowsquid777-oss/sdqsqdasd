@@ -1,0 +1,85 @@
+{
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081"
+	},
+	"id": "user.layoutplacer",
+	"name": "Layout Placer",
+	"version": "v1.1.0",
+	"developer": "user",
+	"description": "Place objects during editor playtest, and save gimmicks that get pasted automatically when your clicks match.",
+	"tags": [
+		"editor",
+		"utility"
+	],
+	"settings": {
+		"offset-x": {
+			"name": "X offset",
+			"description": "Place objects this many units ahead of the player (a block is 30).",
+			"type": "float",
+			"default": 0.0,
+			"min": -300.0,
+			"max": 600.0
+		},
+		"new-clicks": {
+			"name": "New gimmick: clicks",
+			"description": "How many clicks the gimmick you save with G belongs to (1 to 10).",
+			"type": "int",
+			"default": 1,
+			"min": 1,
+			"max": 10
+		},
+		"new-mode": {
+			"name": "New gimmick: gamemode",
+			"description": "Gamemode the gimmick you save with G is used in.",
+			"type": "string",
+			"default": "any",
+			"one-of": [
+				"any",
+				"cube",
+				"ship",
+				"ball",
+				"ufo",
+				"wave",
+				"robot",
+				"spider",
+				"swing"
+			]
+		},
+		"auto-paste": {
+			"name": "Auto paste gimmicks",
+			"type": "bool",
+			"default": true,
+			"description": "Paste saved gimmicks during a playtest when your clicks match."
+		},
+		"window": {
+			"name": "Click window (seconds)",
+			"description": "All clicks of a gimmick must happen within this time.",
+			"type": "float",
+			"default": 1.0,
+			"min": 0.2,
+			"max": 3.0
+		},
+		"chance": {
+			"name": "Paste chance",
+			"type": "float",
+			"default": 0.6,
+			"min": 0.05,
+			"max": 1.0
+		},
+		"min-gap": {
+			"name": "Minimum gap (units)",
+			"description": "Minimum distance between two pasted gimmicks.",
+			"type": "float",
+			"default": 150.0,
+			"min": 0.0,
+			"max": 1500.0
+		},
+		"stretch": {
+			"name": "Vary spacing",
+			"description": "Randomly stretch or squeeze a pasted gimmick horizontally (80% to 120%). Off = pasted exactly as saved.",
+			"type": "bool",
+			"default": false
+		}
+	}
+}
