@@ -68,24 +68,35 @@ static void loadGimmicks() {
 }
 $execute { loadGimmicks(); }
 
-static void saveSelectionAsGimmick(LevelEditorLayer* lel) {
-    if (!lel->m_editorUI) return;
-    auto sel = lel->m_editorUI->getSelectedObjects();
-    if (!sel || sel->count() == 0) return;
-    std::string data; float minX = 1e9f, maxX = -1e9f;
-    for (unsigned i = 0; i < sel->count(); i++) {
-        auto o = static_cast<GameObject*>(sel->objectAtIndex(i));
+static void saveSelectionAsGimmick(EditorUI* ui) {
+    auto lel = LevelEditorLayer::get();
+    if (!lel || !ui) return;
+    std::vector<GameObject*> objs;
+    if (auto sel = ui->getSelectedObjects()) {
+        for (unsigned i = 0; i < sel->count(); i++) objs.push_back(static_cast<GameObject*>(sel->objectAtIndex(i)));
+    }
+    if (objs.empty() && ui->m_selectedObject) objs.push_back(ui->m_selectedObject);
+    if (objs.empty()) {
+        FLAlertLayer::create("Layout Placer", "Nothing selected. Select the objects of your gimmick first, then press Save.", "OK")->show();
+        return;
+    }
+    std::string data; float minX = 1e9f, maxX = -1e9f; int count = 0;
+    for (auto o : objs) {
         std::string s = o->getSaveString(lel);
         if (s.empty()) continue;
         if (s.back() != ';') s += ';';
-        data += s;
+        data += s; count++;
         minX = std::min(minX, o->getPositionX()); maxX = std::max(maxX, o->getPositionX());
     }
-    if (data.empty()) return;
+    if (data.empty()) {
+        FLAlertLayer::create("Layout Placer", "Could not read the selected objects.", "OK")->show();
+        return;
+    }
     int clicks = static_cast<int>(Mod::get()->getSettingValue<int64_t>("new-clicks"));
-    g_gimmicks.push_back({clicks, Mod::get()->getSettingValue<std::string>("new-mode"), maxX - minX + 30.f, data});
+    auto mode = Mod::get()->getSettingValue<std::string>("new-mode");
+    g_gimmicks.push_back({clicks, mode, maxX - minX + 30.f, data});
     storeGimmicks();
-    Notification::create(fmt::format("Gimmick saved ({} click(s)), total {}", clicks, g_gimmicks.size()), NotificationIcon::Success, 1.2f)->show();
+    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as a gimmick for {} click(s), gamemode: {}.\nTotal gimmicks: {}", count, clicks, mode, g_gimmicks.size()), "OK")->show();
 }
 
 static std::mt19937 g_rng{std::random_device{}()};
@@ -163,7 +174,7 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
     g_lastX = x;
     for (size_t i = 0; i < g_pending.size();) {
         if (x > g_pending[i].releaseX) {
-            if (g_pending[i].idx < g_gimmicks.size()) pasteGimmick(lel, g_gimmicks[g_pending[i].idx], g_pending[i].at, g_pending[i].stretch);
+            if (g_pending[i].idx < g_gimmicks.size()) { pasteGimmick(lel, g_gimmicks[g_pending[i].idx], g_pending[i].at, g_pending[i].stretch); Notification::create("Gimmick pasted", NotificationIcon::Success, 0.8f)->show(); }
             g_pending.erase(g_pending.begin() + i);
         } else i++;
     }
@@ -188,8 +199,6 @@ class $modify(PlacerKeys, CCKeyboardDispatcher) {
             auto lel = LevelEditorLayer::get();
             if (lel && lel->m_playbackMode != PlaybackMode::Playing) {
                 g_created.clear();
-                if (key == KEY_G) saveSelectionAsGimmick(lel);
-                else if (key == KEY_H) { g_gimmicks.clear(); storeGimmicks(); Notification::create("All gimmicks cleared", NotificationIcon::None, 0.8f)->show(); }
             }
             if (lel && lel->m_playbackMode == PlaybackMode::Playing && lel->m_player1) {
                 if (key == KEY_Q) { g_sel = (g_sel + COUNT - 1) % COUNT; announce("Selected"); }
@@ -228,13 +237,21 @@ class $modify(PlacerEditorUI, EditorUI) {
         if (!EditorUI::init(editorLayer)) return false;
         this->schedule(schedule_selector(PlacerEditorUI::keepGeneratedVisible));
         auto size = CCDirector::get()->getWinSize();
-        auto spr = ButtonSprite::create("Placer");
-        spr->setScale(0.6f);
-        auto btn = CCMenuItemExt::createSpriteExtra(spr, [](CCObject*) { openSettingsPopup(Mod::get()); });
         auto menu = CCMenu::create();
         menu->setPosition(ccp(0.f, 0.f));
-        btn->setPosition(ccp(40.f, size.height - 110.f));
-        menu->addChild(btn);
+        auto addBtn = [&](char const* label, float y, std::function<void()> fn) {
+            auto spr = ButtonSprite::create(label);
+            spr->setScale(0.6f);
+            auto btn = CCMenuItemExt::createSpriteExtra(spr, [fn](CCObject*) { fn(); });
+            btn->setPosition(ccp(45.f, y));
+            menu->addChild(btn);
+        };
+        addBtn("Placer", size.height - 110.f, []() { openSettingsPopup(Mod::get()); });
+        addBtn("Save", size.height - 140.f, [this]() { saveSelectionAsGimmick(this); });
+        addBtn("Clear", size.height - 170.f, []() {
+            g_gimmicks.clear(); storeGimmicks();
+            FLAlertLayer::create("Layout Placer", "All saved gimmicks were deleted.", "OK")->show();
+        });
         this->addChild(menu, 100);
         return true;
     }
