@@ -8,4 +8,3 @@ jobs:
       - uses: geode-sdk/build-geode-mod@main
         with:
           combine: true
-          target: Windows
