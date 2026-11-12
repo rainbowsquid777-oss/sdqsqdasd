@@ -5,9 +5,9 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.4.0",
+	"version": "v1.6.0",
 	"developer": "user",
-	"description": "Place objects during editor playtest; save gimmicks, verify them by playtesting, and paste them automatically when your click effects and route match the tested route.",
+	"description": "Place objects during editor playtest; save gimmicks together with your latest playtest route, and paste them automatically when your click effects and route match the saved route.",
 	"tags": [
 		"editor",
 		"utility"
@@ -72,11 +72,25 @@
 		},
 		"route-tolerance": {
 			"name": "Route tolerance (units)",
-			"description": "How closely your route must match the tested route of a gimmick (average vertical difference).",
+			"description": "How closely your route must match the saved route of a gimmick (average vertical difference).",
 			"type": "float",
 			"default": 10.0,
 			"min": 2.0,
 			"max": 60.0
+		},
+		"lead-in": {
+			"name": "Lead-in (units)",
+			"description": "How far BEFORE a gimmick's first object your click effects still belong to it (e.g. the jump before a spike).",
+			"type": "float",
+			"default": 180.0,
+			"min": 30.0,
+			"max": 600.0
+		},
+		"debug": {
+			"name": "Debug messages",
+			"description": "Show a small message for every click and every detected click effect.",
+			"type": "bool",
+			"default": true
 		}
 	}
 }

@@ -5,6 +5,8 @@
 #include <Geode/modify/LevelEditorLayer.hpp>
 #include <Geode/ui/GeodeUI.hpp>
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <random>
 #include <sstream>
 using namespace geode::prelude;
@@ -38,18 +40,19 @@ static void announce(char const* prefix) {
 static std::vector<Ref<GameObject>> g_created;
 
 // ======================= Gimmicks =======================
-// 1. Select objects in the editor and press "Save".
-// 2. Playtest through the gimmick once. When you get past it alive, the mod records which click EFFECTS
-//    happened (jump, gravity flip, wave hold/release, ship hold) and your exact route. The gimmick is then "verified".
-//    Every new clean pass re-records the route (the latest tested route is the one that counts).
-// 3. In later playtests, when the same effects happen in the same order and your route so far matches the tested
-//    route, the gimmick is pasted. It is never pasted unverified, and never onto a route that does not match.
+// 1. Playtest through the part of the level where you want the gimmick. The mod keeps the route you flew and the
+//    click EFFECTS that happened (jump, gravity flip, wave hold/release, ship hold) - no extra proof run is needed.
+// 2. Back in the editor, select the objects of the gimmick and press "Save". The objects are saved together with
+//    your most recent route that passed through them (and the click effects along it).
+// 3. In later playtests, when the same effects happen in the same order and your route so far matches the saved
+//    route, the gimmick is pasted - never onto a route that does not match.
 struct Gimmick {
     bool verified = false;
     std::string mode = "cube";
     bool mini = false;
     std::vector<std::string> types;   // effect sequence: kick, flip, hold, release
-    float width = 30.f, x0 = 0.f, x1 = 0.f;
+    float width = 30.f, x0 = 0.f, x1 = 0.f, ay = 0.f;
+    CCPoint off = ccp(0.f, 0.f);      // leftmost object relative to the first click effect
     std::vector<CCPoint> route;       // tested route (player centre) relative to the first effect
     std::string data;
 };
@@ -68,25 +71,27 @@ static void storeGimmicks() {
         std::string types, route;
         for (size_t i = 0; i < g.types.size(); i++) types += (i ? "," : "") + g.types[i];
         for (auto& p : g.route) route += fmt::format("{:.1f},{:.1f};", p.x, p.y);
-        out += fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}\n", g.verified ? 1 : 0, g.mode, g.mini ? 1 : 0, types, g.width, g.x0, g.x1, route, g.data);
+        out += fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n", g.verified ? 1 : 0, g.mode, g.mini ? 1 : 0, types, g.width, g.x0, g.x1, g.ay, g.off.x, g.off.y, route, g.data);
     }
-    Mod::get()->setSavedValue<std::string>("gimmicks2", out);
+    Mod::get()->setSavedValue<std::string>("gimmicks3", out);
 }
 static void loadGimmicks() {
     g_gimmicks.clear();
-    std::istringstream in(Mod::get()->getSavedValue<std::string>("gimmicks2", ""));
+    std::istringstream in(Mod::get()->getSavedValue<std::string>("gimmicks3", ""));
     std::string line;
     while (std::getline(in, line)) {
         std::vector<std::string> f; size_t st = 0;
-        for (int i = 0; i < 8; i++) { auto e = line.find('|', st); if (e == std::string::npos) break; f.push_back(line.substr(st, e - st)); st = e + 1; }
-        if (f.size() != 8) continue;
+        for (int i = 0; i < 11; i++) { auto e = line.find('|', st); if (e == std::string::npos) break; f.push_back(line.substr(st, e - st)); st = e + 1; }
+        if (f.size() != 11) continue;
         Gimmick g;
         g.verified = f[0] == "1"; g.mode = f[1]; g.mini = f[2] == "1";
         for (auto& t : splitStr(f[3], ',')) if (!t.empty()) g.types.push_back(t);
         g.width = static_cast<float>(std::atof(f[4].c_str()));
         g.x0 = static_cast<float>(std::atof(f[5].c_str()));
         g.x1 = static_cast<float>(std::atof(f[6].c_str()));
-        for (auto& pt : splitStr(f[7], ';')) {
+        g.ay = static_cast<float>(std::atof(f[7].c_str()));
+        g.off = ccp(static_cast<float>(std::atof(f[8].c_str())), static_cast<float>(std::atof(f[9].c_str())));
+        for (auto& pt : splitStr(f[10], ';')) {
             auto c = pt.find(',');
             if (c == std::string::npos) continue;
             g.route.push_back(ccp(static_cast<float>(std::atof(pt.substr(0, c).c_str())), static_cast<float>(std::atof(pt.substr(c + 1).c_str()))));
@@ -96,37 +101,6 @@ static void loadGimmicks() {
     }
 }
 $execute { loadGimmicks(); }
-
-static void saveSelectionAsGimmick(EditorUI* ui) {
-    auto lel = LevelEditorLayer::get();
-    if (!lel || !ui) return;
-    std::vector<GameObject*> objs;
-    if (auto sel = ui->getSelectedObjects()) {
-        for (unsigned i = 0; i < sel->count(); i++) objs.push_back(static_cast<GameObject*>(sel->objectAtIndex(i)));
-    }
-    if (objs.empty() && ui->m_selectedObject) objs.push_back(ui->m_selectedObject);
-    if (objs.empty()) {
-        FLAlertLayer::create("Layout Placer", "Nothing selected. Select the objects of your gimmick first, then press Save.", "OK")->show();
-        return;
-    }
-    std::string data; float minX = 1e9f, maxX = -1e9f; int count = 0;
-    for (auto o : objs) {
-        std::string s = o->getSaveString(lel);
-        if (s.empty()) continue;
-        if (s.back() != ';') s += ';';
-        data += s; count++;
-        minX = std::min(minX, o->getPositionX()); maxX = std::max(maxX, o->getPositionX());
-    }
-    if (data.empty()) {
-        FLAlertLayer::create("Layout Placer", "Could not read the selected objects.", "OK")->show();
-        return;
-    }
-    Gimmick g;
-    g.width = maxX - minX + 30.f; g.x0 = minX; g.x1 = maxX; g.data = data;
-    g_gimmicks.push_back(std::move(g));
-    storeGimmicks();
-    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as gimmick #{}.\n\nNow playtest through it once. When you get past it alive, it is verified and can be pasted automatically.", count, g_gimmicks.size()), "OK")->show();
-}
 
 static std::mt19937 g_rng{std::random_device{}()};
 static float rnd() { return std::uniform_real_distribution<float>(0.f, 1.f)(g_rng); }
@@ -166,10 +140,12 @@ static bool blocksPath(GameObject* o, float margin) {
 
 // ---- click effects ----
 struct Ev { std::string type; CCPoint pos; float t; std::string mode; bool mini; };
-struct Rec { bool active = false; std::vector<CCPoint> pts; std::vector<Ev> evs; };
+struct Run { int presses = 0; std::vector<CCPoint> pts; std::vector<Ev> evs; };   // one playtest attempt: route + click effects
 struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; };
 static std::vector<Ev> g_events;
-static std::vector<Rec> g_recs;
+static std::vector<Run> g_runs;   // finished attempts (newest last)
+static Run g_cur;                 // the attempt in progress / the last one
+static bool g_newRunPending = false, g_wasPlaying = false;
 static std::vector<Pending> g_pending;
 static float g_time = 0.f, g_lastPlacedX = -1e9f, g_lastX = 0.f;
 static float g_lastPress = -10.f, g_lastRelease = -10.f;
@@ -179,29 +155,50 @@ static CCPoint g_prevPos; static float g_prevVyN = 0.f; static bool g_prevUpside
 // A click only counts when it has an EFFECT shortly afterwards:
 //   cube / ufo / robot : an upward kick (jump, orb)      ball / spider / swing : gravity flip
 //   wave : goes up after pressing ("hold") or down after releasing ("release")      ship : starts rising ("hold")
-static std::string detectEffect(PlayerObject* pl, float dt) {
+static float g_dbgMaxKick = 0.f;
+static float g_prevR = 0.f, g_pressR = 0.f;   // vertical slope (dy per dx) at the last update / when the button was pressed
+
+// Wall-clock seconds. (The dt passed to PlayerObject::update is not guaranteed to be seconds, so it is not used for timing.)
+static float nowSeconds() {
+    static auto t0 = std::chrono::steady_clock::now();
+    return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0).count();
+}
+static bool debugOn() { return Mod::get()->getSettingValue<bool>("debug"); }
+
+// Vertical motion is measured as a SLOPE (dy per dx) between two consecutive updates. That does not depend on the
+// time step, the frame rate or the game speed: a jump / orb kicks the slope up by a lot in one step, gravity only
+// changes it a little per step.
+static std::string detectEffect(PlayerObject* pl) {
     std::string type;
     auto pos = pl->getPosition();
     bool up = pl->m_isUpsideDown;
-    float sign = up ? -1.f : 1.f;
-    float vyN = (g_havePrevState && dt > 1e-5f) ? sign * (pos.y - g_prevPos.y) / dt : 0.f;
-    if (g_pendPress && g_time - g_lastPress > 0.25f) g_pendPress = false;
-    if (g_pendRelease && g_time - g_lastRelease > 0.25f) g_pendRelease = false;
-    if (g_havePrevState) {
-        std::string mode = modeOf(pl);
-        if (mode == "ball" || mode == "spider" || mode == "swing") {
-            if (g_pendPress && up != g_prevUpside) { type = "flip"; g_pendPress = false; }
-        } else if (mode == "wave") {
-            if (g_pendPress && vyN > 60.f) { type = "hold"; g_pendPress = false; }
-            else if (g_pendRelease && vyN < -60.f) { type = "release"; g_pendRelease = false; }
-        } else if (mode == "ship") {
-            if (g_pendPress && ((vyN > 0.f && g_prevVyN <= 0.f) || (vyN - g_prevVyN) > 3.f)) { type = "hold"; g_pendPress = false; }
-        } else {
-            float kick = mode == "robot" ? 60.f : 200.f;
-            if (g_pendPress && (vyN - g_prevVyN) > kick) { type = "kick"; g_pendPress = false; }
-        }
+    std::string mode = modeOf(pl);
+    if (!g_havePrevState) { g_prevPos = pos; g_prevUpside = up; g_prevR = 0.f; g_havePrevState = true; return type; }
+    if (g_pendPress && g_time - g_lastPress > 0.3f) g_pendPress = false;
+    if (g_pendRelease && g_time - g_lastRelease > 0.3f) g_pendRelease = false;
+
+    if (up != g_prevUpside) {   // gravity flipped
+        if (g_pendPress && (mode == "ball" || mode == "spider" || mode == "swing")) { type = "flip"; g_pendPress = false; }
+        g_prevUpside = up; g_prevPos = pos; g_prevR = 0.f;
+        return type;
     }
-    g_prevPos = pos; g_prevVyN = vyN; g_prevUpside = up; g_havePrevState = true;
+    float dx = pos.x - g_prevPos.x;
+    if (dx < 0.02f) return type;   // no horizontal movement since the last sample: wait for the next one
+    float sign = up ? -1.f : 1.f;
+    float r = sign * (pos.y - g_prevPos.y) / dx;
+    float dr = r - g_prevR;
+    if (g_pendPress) g_dbgMaxKick = std::max(g_dbgMaxKick, dr);
+
+    if (mode == "wave") {
+        if (g_pendPress && r > 0.5f) { type = "hold"; g_pendPress = false; }
+        else if (g_pendRelease && r < -0.5f) { type = "release"; g_pendRelease = false; }
+    } else if (mode == "ship") {
+        if (g_pendPress && r - g_pressR > 0.25f) { type = "hold"; g_pendPress = false; }
+    } else if (mode != "ball" && mode != "spider" && mode != "swing") {
+        float kick = mode == "robot" ? 0.12f : 0.3f;
+        if (g_pendPress && dr > kick && r > 0.05f) { type = "kick"; g_pendPress = false; }
+    }
+    g_prevPos = pos; g_prevR = r; g_prevUpside = up;
     return type;
 }
 
@@ -218,27 +215,6 @@ static bool routeMatches(Gimmick const& g, CCPoint e0, float tol) {
     }
     if (n < 5) return false;
     return sum / n <= tol && mx <= tol * 3.f;
-}
-
-static void finalizeRecording(size_t i) {
-    auto& g = g_gimmicks[i]; auto& r = g_recs[i];
-    if (r.evs.empty()) {
-        Notification::create(fmt::format("Gimmick #{}: no click effect found while passing it, not verified", i + 1), NotificationIcon::Warning, 1.5f)->show();
-        return;
-    }
-    auto e0 = r.evs[0];
-    g.types.clear();
-    for (auto& e : r.evs) g.types.push_back(e.type);
-    g.mode = e0.mode; g.mini = e0.mini;
-    g.route.clear(); float lastX = -1e9f;
-    for (auto& p : r.pts) {
-        CCPoint rel = p - e0.pos;
-        if (rel.x < -30.f || rel.x - lastX < 2.f) continue;
-        g.route.push_back(rel); lastX = rel.x;
-    }
-    g.verified = true;
-    storeGimmicks();
-    Notification::create(fmt::format("Gimmick #{} verified ({} effect(s), route recorded)", i + 1, g.types.size()), NotificationIcon::Success, 1.5f)->show();
 }
 
 static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint at, float stretch) {
@@ -279,8 +255,8 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     Ev ev{type, pl->getPosition(), g_time, modeOf(pl), isMini(pl)};
     g_events.push_back(ev);
     while (g_events.size() > 16) g_events.erase(g_events.begin());
-    for (size_t i = 0; i < g_recs.size() && i < g_gimmicks.size(); i++)
-        if (g_recs[i].active && ev.pos.x >= g_gimmicks[i].x0 - 60.f) g_recs[i].evs.push_back(ev);
+    if (g_cur.evs.size() < 3000) g_cur.evs.push_back(ev);
+    if (debugOn()) Notification::create(fmt::format("effect: {} ({}{})", type, ev.mode, ev.mini ? ", mini" : ""), NotificationIcon::None, 0.5f)->show();
 
     if (!Mod::get()->getSettingValue<bool>("auto-paste")) return;
     float window = static_cast<float>(Mod::get()->getSettingValue<double>("window"));
@@ -298,7 +274,7 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
         if (first.mode != g.mode || first.mini != g.mini) continue;
         if (g_events.back().t - first.t > window) continue;
         if (first.pos.x - g_lastPlacedX < gap) continue;
-        if (first.pos.x >= g.x0 - 60.f && first.pos.x <= g.x1 + 60.f) continue;   // that is the original gimmick itself
+        if (first.pos.x >= g.x0 - g.off.x - 20.f && first.pos.x <= g.x1 + 60.f) continue;   // that is the original gimmick itself
         if (n > best) { best = n; cands.clear(); }
         if (n == best) cands.push_back(i);
     }
@@ -307,51 +283,115 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     auto& g = g_gimmicks[idx];
     auto first = g_events[g_events.size() - g.types.size()];
     float stretch = Mod::get()->getSettingValue<bool>("stretch") ? 0.9f + 0.2f * rnd() : 1.f;
-    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.width * stretch + 60.f});
+    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f});
     g_lastPlacedX = first.pos.x;
     g_events.clear();
+}
+
+static void saveSelectionAsGimmick(EditorUI* ui) {
+    auto lel = LevelEditorLayer::get();
+    if (!lel || !ui) return;
+    std::vector<GameObject*> objs;
+    if (auto sel = ui->getSelectedObjects()) {
+        for (unsigned i = 0; i < sel->count(); i++) objs.push_back(static_cast<GameObject*>(sel->objectAtIndex(i)));
+    }
+    if (objs.empty() && ui->m_selectedObject) objs.push_back(ui->m_selectedObject);
+    if (objs.empty()) {
+        FLAlertLayer::create("Layout Placer", "Nothing selected. Select the objects of your gimmick first, then press Save.", "OK")->show();
+        return;
+    }
+    std::string data; float minX = 1e9f, maxX = -1e9f, anchorY = 0.f; int count = 0;
+    for (auto o : objs) {
+        std::string s = o->getSaveString(lel);
+        if (s.empty()) continue;
+        if (s.back() != ';') s += ';';
+        data += s; count++;
+        if (o->getPositionX() < minX || (o->getPositionX() == minX && o->getPositionY() < anchorY)) anchorY = o->getPositionY();
+        minX = std::min(minX, o->getPositionX()); maxX = std::max(maxX, o->getPositionX());
+    }
+    if (data.empty()) {
+        FLAlertLayer::create("Layout Placer", "Could not read the selected objects.", "OK")->show();
+        return;
+    }
+
+    // The most recent playtest route that flew through all selected objects.
+    auto passes = [&](Run const& r) { return r.pts.size() >= 5 && r.pts.front().x <= minX && r.pts.back().x >= maxX + 30.f; };
+    Run const* run = nullptr;
+    if (passes(g_cur)) run = &g_cur;
+    else for (auto it = g_runs.rbegin(); it != g_runs.rend(); ++it) if (passes(*it)) { run = &*it; break; }
+    if (!run) {
+        FLAlertLayer::create("Layout Placer", "No recent playtest route passes through the selected objects.\n\nPlaytest this part of the level first (start before the objects and get past them), then select the objects and press Save.", "OK")->show();
+        return;
+    }
+
+    // Click effects that belong to this gimmick: from a little before the first object up to the last object.
+    float lead = static_cast<float>(Mod::get()->getSettingValue<double>("lead-in"));
+    std::vector<Ev> evs;
+    for (auto& e : run->evs) if (e.pos.x >= minX - lead && e.pos.x <= maxX) evs.push_back(e);
+    if (evs.empty()) {
+        FLAlertLayer::create("Layout Placer", fmt::format("Your latest route through these objects has no click effect (jump, gravity flip, wave hold/release, ship hold) from {:.0f} units before the first object up to the last one.\n\nClicks seen in that run: {}. Raise \"Lead-in\" in the settings if your click happened earlier.", lead, run->presses).c_str(), "OK")->show();
+        return;
+    }
+
+    Gimmick g;
+    auto e0 = evs[0];
+    g.width = maxX - minX + 30.f; g.x0 = minX; g.x1 = maxX; g.ay = anchorY; g.data = data;
+    g.mode = e0.mode; g.mini = e0.mini;
+    for (auto& e : evs) g.types.push_back(e.type);
+    g.off = ccp(g.x0 - e0.pos.x, g.ay - e0.pos.y);
+    float lastX = -1e9f;
+    for (auto& p : run->pts) {
+        CCPoint rel = p - e0.pos;
+        if (rel.x < -30.f || p.x > maxX + 60.f || rel.x - lastX < 2.f) continue;
+        g.route.push_back(rel); lastX = rel.x;
+    }
+    if (g.route.size() < 3) {
+        FLAlertLayer::create("Layout Placer", "The route near the first click effect is too short to save. Playtest a bit further before the objects.", "OK")->show();
+        return;
+    }
+    g.verified = true;   // it has a recorded route; that is all that is needed
+    size_t nEff = g.types.size();
+    g_gimmicks.push_back(std::move(g));
+    storeGimmicks();
+    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as gimmick #{} together with your latest route ({} click effect(s)).\n\nIt is pasted automatically when your click effects and route match this route.", count, g_gimmicks.size(), nEff).c_str(), "OK")->show();
 }
 
 static void onPlayerPress(PlayerObject* pl) {
     auto lel = LevelEditorLayer::get();
     if (!lel || lel->m_playbackMode != PlaybackMode::Playing || pl != lel->m_player1) return;
-    g_pendPress = true; g_lastPress = g_time;
+    g_pendPress = true; g_lastPress = nowSeconds(); g_pressR = g_prevR;
+    g_cur.presses++;
+    if (debugOn()) Notification::create("click", NotificationIcon::None, 0.3f)->show();
 }
 static void onPlayerRelease(PlayerObject* pl) {
     auto lel = LevelEditorLayer::get();
     if (!lel || lel->m_playbackMode != PlaybackMode::Playing || pl != lel->m_player1) return;
-    g_pendRelease = true; g_lastRelease = g_time;
+    g_pendRelease = true; g_lastRelease = nowSeconds();
 }
 
 static void onPlayerUpdate(PlayerObject* pl, float dt) {
     auto lel = LevelEditorLayer::get();
     if (!lel || lel->m_playbackMode != PlaybackMode::Playing || pl != lel->m_player1) return;
-    g_time += dt;
+    (void)dt;
+    g_time = nowSeconds();
     float x = pl->getPositionX();
-    if (g_recs.size() != g_gimmicks.size()) g_recs.assign(g_gimmicks.size(), Rec{});
-    if (x < g_lastX - 100.f) {   // restart / death / checkpoint
+    if (g_newRunPending || x < g_lastX - 100.f) {   // new playtest / restart / death / checkpoint
+        g_newRunPending = false;
+        if (g_cur.pts.size() >= 5) { g_runs.push_back(std::move(g_cur)); if (g_runs.size() > 6) g_runs.erase(g_runs.begin()); }
+        g_cur = Run{};
         g_events.clear(); g_pending.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
         g_havePrevState = false; g_pendPress = g_pendRelease = false;
-        for (auto& r : g_recs) { r.active = false; r.pts.clear(); r.evs.clear(); }
     }
     g_lastX = x;
     {
         CCRect cur = playerRect(pl);
         g_path.push_back(g_hasPrev ? rectUnion(g_prevRect, cur) : cur);
         g_pts.push_back(pl->getPosition());
+        if (g_cur.pts.empty() || x - g_cur.pts.back().x >= 2.f) { if (g_cur.pts.size() < 100000) g_cur.pts.push_back(pl->getPosition()); }
         g_prevRect = cur; g_hasPrev = true;
         if (g_path.size() > 60000) { g_path.erase(g_path.begin(), g_path.begin() + 30000); g_pts.erase(g_pts.begin(), g_pts.begin() + 30000); }
     }
-    // record / verify the original gimmicks while the player passes them
-    for (size_t i = 0; i < g_gimmicks.size(); i++) {
-        auto& g = g_gimmicks[i]; auto& r = g_recs[i];
-        if (!r.active && x >= g.x0 - 60.f && x <= g.x1) { r.active = true; r.pts.clear(); r.evs.clear(); }
-        if (r.active) {
-            r.pts.push_back(pl->getPosition());
-            if (x > g.x1 + 60.f) { finalizeRecording(i); r.active = false; r.pts.clear(); r.evs.clear(); }
-        }
-    }
-    auto type = detectEffect(pl, dt);
+    auto type = detectEffect(pl);
     if (!type.empty()) onEffect(pl, type);
 
     float tol = static_cast<float>(Mod::get()->getSettingValue<double>("route-tolerance"));
@@ -361,10 +401,10 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             g_pending.erase(g_pending.begin() + i);
             if (p.idx >= g_gimmicks.size()) continue;
             if (!routeMatches(g_gimmicks[p.idx], p.at, tol)) {
-                Notification::create("Gimmick skipped: your route differs from the tested route", NotificationIcon::Warning, 1.f)->show();
+                Notification::create("Gimmick skipped: your route differs from the saved route", NotificationIcon::Warning, 1.f)->show();
                 continue;
             }
-            int removed = pasteGimmick(lel, g_gimmicks[p.idx], p.at, p.stretch);
+            int removed = pasteGimmick(lel, g_gimmicks[p.idx], ccp(p.at.x + g_gimmicks[p.idx].off.x, p.at.y + g_gimmicks[p.idx].off.y), p.stretch);
             Notification::create(removed ? fmt::format("Gimmick pasted ({} object(s) left out: they touched your route)", removed) : std::string("Gimmick pasted"), NotificationIcon::Success, 1.f)->show();
         } else i++;
     }
@@ -423,7 +463,10 @@ class $modify(TrackLevelEditor, LevelEditorLayer) {
 class $modify(PlacerEditorUI, EditorUI) {
     void keepGeneratedVisible(float) {
         auto lel = LevelEditorLayer::get();
-        if (!lel || lel->m_playbackMode != PlaybackMode::Playing) return;
+        bool playing = lel && lel->m_playbackMode == PlaybackMode::Playing;
+        if (!playing && g_wasPlaying) g_newRunPending = true;   // playtest ended: the next one starts a new attempt
+        g_wasPlaying = playing;
+        if (!playing) return;
         if (!Mod::get()->getSettingValue<bool>("show-generated")) return;
         for (auto& o : g_created) if (o) o->setVisible(true);
     }
