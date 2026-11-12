@@ -46,14 +46,17 @@ static std::vector<Ref<GameObject>> g_created;
 //    your most recent route that passed through them (and the click effects along it).
 // 3. In later playtests, when the same effects happen in the same order and your route so far matches the saved
 //    route, the gimmick is pasted - never onto a route that does not match.
+// Gimmicks are stored relative to YOUR gravity: a block under you when you saved it is pasted under you again, and
+// mirrored upside down if your gravity is flipped now. Blocks you stand on / land on are kept.
 struct Gimmick {
     bool verified = false;
     std::string mode = "cube";
     bool mini = false;
+    bool up = false;                  // gravity was upside down when it was saved (everything below is stored gravity-relative)
     std::vector<std::string> types;   // effect sequence: kick, flip, hold, release
     float width = 30.f, x0 = 0.f, x1 = 0.f, ay = 0.f;
-    CCPoint off = ccp(0.f, 0.f);      // leftmost object relative to the first click effect
-    std::vector<CCPoint> route;       // tested route (player centre) relative to the first effect
+    CCPoint off = ccp(0.f, 0.f);      // leftmost object relative to the first click effect (y is gravity-relative)
+    std::vector<CCPoint> route;       // saved route (player centre) relative to the first effect (y is gravity-relative)
     std::string data;
 };
 static std::vector<Gimmick> g_gimmicks;
@@ -71,27 +74,31 @@ static void storeGimmicks() {
         std::string types, route;
         for (size_t i = 0; i < g.types.size(); i++) types += (i ? "," : "") + g.types[i];
         for (auto& p : g.route) route += fmt::format("{:.1f},{:.1f};", p.x, p.y);
-        out += fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n", g.verified ? 1 : 0, g.mode, g.mini ? 1 : 0, types, g.width, g.x0, g.x1, g.ay, g.off.x, g.off.y, route, g.data);
+        out += fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n", g.verified ? 1 : 0, g.mode, g.mini ? 1 : 0, g.up ? 1 : 0, types, g.width, g.x0, g.x1, g.ay, g.off.x, g.off.y, route, g.data);
     }
-    Mod::get()->setSavedValue<std::string>("gimmicks3", out);
+    Mod::get()->setSavedValue<std::string>("gimmicks4", out);
 }
-static void loadGimmicks() {
-    g_gimmicks.clear();
-    std::istringstream in(Mod::get()->getSavedValue<std::string>("gimmicks3", ""));
+static void parseGimmicks(std::string const& text, bool hasUp) {
+    std::istringstream in(text);
     std::string line;
+    int nf = hasUp ? 12 : 11;
     while (std::getline(in, line)) {
         std::vector<std::string> f; size_t st = 0;
-        for (int i = 0; i < 11; i++) { auto e = line.find('|', st); if (e == std::string::npos) break; f.push_back(line.substr(st, e - st)); st = e + 1; }
-        if (f.size() != 11) continue;
+        for (int i = 0; i < nf; i++) { auto e = line.find('|', st); if (e == std::string::npos) break; f.push_back(line.substr(st, e - st)); st = e + 1; }
+        if (static_cast<int>(f.size()) != nf) continue;
+        size_t k = 0;
         Gimmick g;
-        g.verified = f[0] == "1"; g.mode = f[1]; g.mini = f[2] == "1";
-        for (auto& t : splitStr(f[3], ',')) if (!t.empty()) g.types.push_back(t);
-        g.width = static_cast<float>(std::atof(f[4].c_str()));
-        g.x0 = static_cast<float>(std::atof(f[5].c_str()));
-        g.x1 = static_cast<float>(std::atof(f[6].c_str()));
-        g.ay = static_cast<float>(std::atof(f[7].c_str()));
-        g.off = ccp(static_cast<float>(std::atof(f[8].c_str())), static_cast<float>(std::atof(f[9].c_str())));
-        for (auto& pt : splitStr(f[10], ';')) {
+        g.verified = f[k++] == "1"; g.mode = f[k++]; g.mini = f[k++] == "1";
+        if (hasUp) g.up = f[k++] == "1";
+        for (auto& t : splitStr(f[k++], ',')) if (!t.empty()) g.types.push_back(t);
+        g.width = static_cast<float>(std::atof(f[k++].c_str()));
+        g.x0 = static_cast<float>(std::atof(f[k++].c_str()));
+        g.x1 = static_cast<float>(std::atof(f[k++].c_str()));
+        g.ay = static_cast<float>(std::atof(f[k++].c_str()));
+        float ox = static_cast<float>(std::atof(f[k++].c_str()));
+        float oy = static_cast<float>(std::atof(f[k++].c_str()));
+        g.off = ccp(ox, oy);
+        for (auto& pt : splitStr(f[k++], ';')) {
             auto c = pt.find(',');
             if (c == std::string::npos) continue;
             g.route.push_back(ccp(static_cast<float>(std::atof(pt.substr(0, c).c_str())), static_cast<float>(std::atof(pt.substr(c + 1).c_str()))));
@@ -99,6 +106,12 @@ static void loadGimmicks() {
         g.data = line.substr(st);
         g_gimmicks.push_back(std::move(g));
     }
+}
+static void loadGimmicks() {
+    g_gimmicks.clear();
+    auto cur = Mod::get()->getSavedValue<std::string>("gimmicks4", "");
+    if (!cur.empty()) { parseGimmicks(cur, true); return; }
+    parseGimmicks(Mod::get()->getSavedValue<std::string>("gimmicks3", ""), false);   // saved by an older version (gravity down)
 }
 $execute { loadGimmicks(); }
 
@@ -129,20 +142,56 @@ static CCRect rectUnion(CCRect const& a, CCRect const& b) {
     float x1 = std::max(a.getMaxX(), b.getMaxX()), y1 = std::max(a.getMaxY(), b.getMaxY());
     return CCRect(x0, y0, x1 - x0, y1 - y0);
 }
+// Spikes / slopes that come close to the route are left out. A solid block is only left out when it is really in the
+// way (the route runs into or through it). A block that the route merely touches from above or below (the one you
+// land on / stand on / hang from, in YOUR gravity) stays.
 static bool blocksPath(GameObject* o, float margin) {
     auto t = o->m_objectType;
-    if (t != GameObjectType::Solid && t != GameObjectType::Hazard && t != GameObjectType::Slope) return false;
+    bool solid = t == GameObjectType::Solid;
+    if (!solid && t != GameObjectType::Hazard && t != GameObjectType::Slope) return false;
     CCRect r = o->getObjectRect();
-    r.origin.x -= margin; r.origin.y -= margin; r.size.width += margin * 2.f; r.size.height += margin * 2.f;
-    for (auto& p : g_path) if (p.intersectsRect(r)) return true;
+    if (!solid) {
+        r.origin.x -= margin; r.origin.y -= margin; r.size.width += margin * 2.f; r.size.height += margin * 2.f;
+        for (auto& p : g_path) if (p.intersectsRect(r)) return true;
+        return false;
+    }
+    for (auto& p : g_path) {
+        float ox = std::min(p.getMaxX(), r.getMaxX()) - std::max(p.getMinX(), r.getMinX());
+        float oy = std::min(p.getMaxY(), r.getMaxY()) - std::max(p.getMinY(), r.getMinY());
+        if (ox > -margin && oy > 4.f) return true;   // vertical contact (oy <= 4) = standing on it / touching it: fine
+    }
     return false;
 }
 
 // ---- click effects ----
-struct Ev { std::string type; CCPoint pos; float t; std::string mode; bool mini; };
+struct Ev { std::string type; CCPoint pos; float t; std::string mode; bool mini; bool up; };
 struct Run { int presses = 0; std::vector<CCPoint> pts; std::vector<Ev> evs; };   // one playtest attempt: route + click effects
-struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; };
+struct Pending { size_t idx; CCPoint at; float stretch; float releaseX; bool up; };
 static std::vector<Ev> g_events;
+
+// ---- room check: the X range a gimmick will occupy is computed BEFORE it is pasted ----
+struct Span { float l, r; };
+static std::vector<Span> g_reserved;   // X ranges of gimmicks that are queued / pasted in this run
+static Span gimmickSpan(Gimmick const& g, CCPoint e0, float stretch) {
+    float l = e0.x + g.off.x - 15.f;                                       // leftmost object (a block is 30 wide)
+    float r = e0.x + g.off.x + (g.x1 - g.x0) * stretch + 15.f;             // rightmost object
+    return {l, r};
+}
+// X distance from the span to the nearest other object of the level (0 = overlapping in X).
+static float nearestObjectGap(LevelEditorLayer* lel, Span s, bool withDeco) {
+    float best = 1e9f;
+    auto objs = lel->m_objects;
+    if (!objs) return best;
+    for (unsigned i = 0; i < objs->count(); i++) {
+        auto o = static_cast<GameObject*>(objs->objectAtIndex(i));
+        if (!o) continue;
+        if (!withDeco && o->m_objectType == GameObjectType::Decoration) continue;
+        CCRect r = o->getObjectRect();
+        float gap = std::max(r.getMinX() - s.r, s.l - r.getMaxX());
+        best = std::min(best, gap < 0.f ? 0.f : gap);
+    }
+    return best;
+}
 static std::vector<Run> g_runs;   // finished attempts (newest last)
 static Run g_cur;                 // the attempt in progress / the last one
 static bool g_newRunPending = false, g_wasPlaying = false;
@@ -156,6 +205,7 @@ static CCPoint g_prevPos; static float g_prevVyN = 0.f; static bool g_prevUpside
 //   cube / ufo / robot : an upward kick (jump, orb)      ball / spider / swing : gravity flip
 //   wave : goes up after pressing ("hold") or down after releasing ("release")      ship : starts rising ("hold")
 static float g_dbgMaxKick = 0.f;
+static bool g_falling = false;
 static float g_prevR = 0.f, g_pressR = 0.f;   // vertical slope (dy per dx) at the last update / when the button was pressed
 
 // Wall-clock seconds. (The dt passed to PlayerObject::update is not guaranteed to be seconds, so it is not used for timing.)
@@ -173,13 +223,13 @@ static std::string detectEffect(PlayerObject* pl) {
     auto pos = pl->getPosition();
     bool up = pl->m_isUpsideDown;
     std::string mode = modeOf(pl);
-    if (!g_havePrevState) { g_prevPos = pos; g_prevUpside = up; g_prevR = 0.f; g_havePrevState = true; return type; }
+    if (!g_havePrevState) { g_prevPos = pos; g_prevUpside = up; g_prevR = 0.f; g_falling = false; g_havePrevState = true; return type; }
     if (g_pendPress && g_time - g_lastPress > 0.3f) g_pendPress = false;
     if (g_pendRelease && g_time - g_lastRelease > 0.3f) g_pendRelease = false;
 
     if (up != g_prevUpside) {   // gravity flipped
         if (g_pendPress && (mode == "ball" || mode == "spider" || mode == "swing")) { type = "flip"; g_pendPress = false; }
-        g_prevUpside = up; g_prevPos = pos; g_prevR = 0.f;
+        g_prevUpside = up; g_prevPos = pos; g_prevR = 0.f; g_falling = false;
         return type;
     }
     float dx = pos.x - g_prevPos.x;
@@ -198,15 +248,21 @@ static std::string detectEffect(PlayerObject* pl) {
         float kick = mode == "robot" ? 0.12f : 0.3f;
         if (g_pendPress && dr > kick && r > 0.05f) { type = "kick"; g_pendPress = false; }
     }
+    // "fall": a cube / ufo / robot starts falling (off an edge or after the top of a jump).
+    if (mode == "cube" || mode == "ufo" || mode == "robot") {
+        if (g_falling) { if (r > -0.1f) g_falling = false; }
+        else if (r < -0.3f) { g_falling = true; if (type.empty()) type = "fall"; }
+    } else g_falling = false;
     g_prevPos = pos; g_prevR = r; g_prevUpside = up;
     return type;
 }
 
-static bool routeMatches(Gimmick const& g, CCPoint e0, float tol) {
+static bool routeMatches(Gimmick const& g, CCPoint e0, float tol, bool curUp) {
     if (g.route.size() < 3) return false;
+    float s = curUp ? -1.f : 1.f;   // compare in gravity-relative terms
     int n = 0; float sum = 0.f, mx = 0.f;
     for (auto& p : g_pts) {
-        float rx = p.x - e0.x, ry = p.y - e0.y;
+        float rx = p.x - e0.x, ry = s * (p.y - e0.y);
         if (rx < g.route.front().x || rx > g.route.back().x) continue;
         auto it = std::lower_bound(g.route.begin(), g.route.end(), rx, [](CCPoint const& a, float v) { return a.x < v; });
         if (it == g.route.end()) continue;
@@ -217,42 +273,41 @@ static bool routeMatches(Gimmick const& g, CCPoint e0, float tol) {
     return sum / n <= tol && mx <= tol * 3.f;
 }
 
-static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint at, float stretch) {
+static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, float stretch, bool curUp) {
     if (!lel->m_editorUI) return 0;
     auto arr = lel->createObjectsFromString(g.data, true, false);
     if (!arr || arr->count() == 0) return 0;
-    GameObject* anchor = nullptr;
+    std::vector<GameObject*> objs; std::vector<CCPoint> saved;
     for (unsigned i = 0; i < arr->count(); i++) {
         auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
-        if (!anchor || o->getPositionX() < anchor->getPositionX() ||
-            (o->getPositionX() == anchor->getPositionX() && o->getPositionY() < anchor->getPositionY())) anchor = o;
+        objs.push_back(o); saved.push_back(o->getPosition());
     }
-    CCPoint a = anchor->getPosition();
-    for (unsigned i = 0; i < arr->count(); i++) {
-        auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
-        CCPoint p = o->getPosition();
-        CCPoint target = ccp(at.x + (p.x - a.x) * stretch, at.y + (p.y - a.y));
-        lel->m_editorUI->moveObject(o, target - p);
+    size_t ai = 0;
+    for (size_t i = 1; i < objs.size(); i++)
+        if (saved[i].x < saved[ai].x || (saved[i].x == saved[ai].x && saved[i].y < saved[ai].y)) ai = i;
+    CCPoint a = saved[ai];
+    float sSaved = g.up ? -1.f : 1.f, sCur = curUp ? -1.f : 1.f;
+    bool flip = g.up != curUp;   // saved with the other gravity: mirror the gimmick so it is "below" you again
+    for (size_t i = 0; i < objs.size(); i++) {
+        auto o = objs[i];
+        float relY = g.off.y + sSaved * (saved[i].y - a.y);   // gravity-relative height above the first click effect
+        CCPoint target = ccp(e0.x + g.off.x + (saved[i].x - a.x) * stretch, e0.y + sCur * relY);
+        if (flip) lel->m_editorUI->transformObject(o, EditCommand::FlipY, false);
+        lel->m_editorUI->moveObject(o, target - o->getPosition());
     }
     float margin = static_cast<float>(Mod::get()->getSettingValue<double>("safety-margin"));
     std::vector<GameObject*> bad;
-    for (unsigned i = 0; i < arr->count(); i++) {
-        auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
-        if (blocksPath(o, margin)) bad.push_back(o);
-    }
+    for (auto o : objs) if (blocksPath(o, margin)) bad.push_back(o);
     for (auto o : bad) {
         g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& r) { return r.data() == o; }), g_created.end());
         lel->removeObject(o, true);
     }
-    for (unsigned i = 0; i < arr->count(); i++) {
-        auto o = static_cast<GameObject*>(arr->objectAtIndex(i));
-        if (std::find(bad.begin(), bad.end(), o) == bad.end()) g_created.push_back(o);
-    }
+    for (auto o : objs) if (std::find(bad.begin(), bad.end(), o) == bad.end()) g_created.push_back(o);
     return static_cast<int>(bad.size());
 }
 
 static void onEffect(PlayerObject* pl, std::string const& type) {
-    Ev ev{type, pl->getPosition(), g_time, modeOf(pl), isMini(pl)};
+    Ev ev{type, pl->getPosition(), g_time, modeOf(pl), isMini(pl), pl->m_isUpsideDown};
     g_events.push_back(ev);
     while (g_events.size() > 16) g_events.erase(g_events.begin());
     if (g_cur.evs.size() < 3000) g_cur.evs.push_back(ev);
@@ -283,7 +338,11 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     auto& g = g_gimmicks[idx];
     auto first = g_events[g_events.size() - g.types.size()];
     float stretch = Mod::get()->getSettingValue<bool>("stretch") ? 0.9f + 0.2f * rnd() : 1.f;
-    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f});
+    float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
+    Span sp = gimmickSpan(g, first.pos, stretch);
+    for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) return;   // too close to another gimmick of this run
+    g_reserved.push_back(sp);
+    g_pending.push_back({idx, first.pos, stretch, first.pos.x + g.off.x + g.width * stretch + 60.f, first.up});
     g_lastPlacedX = first.pos.x;
     g_events.clear();
 }
@@ -336,12 +395,13 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     Gimmick g;
     auto e0 = evs[0];
     g.width = maxX - minX + 30.f; g.x0 = minX; g.x1 = maxX; g.ay = anchorY; g.data = data;
-    g.mode = e0.mode; g.mini = e0.mini;
+    g.mode = e0.mode; g.mini = e0.mini; g.up = e0.up;
+    float sg = g.up ? -1.f : 1.f;   // store everything gravity-relative
     for (auto& e : evs) g.types.push_back(e.type);
-    g.off = ccp(g.x0 - e0.pos.x, g.ay - e0.pos.y);
+    g.off = ccp(g.x0 - e0.pos.x, sg * (g.ay - e0.pos.y));
     float lastX = -1e9f;
     for (auto& p : run->pts) {
-        CCPoint rel = p - e0.pos;
+        CCPoint rel = p - e0.pos; rel.y *= sg;
         if (rel.x < -30.f || p.x > maxX + 60.f || rel.x - lastX < 2.f) continue;
         g.route.push_back(rel); lastX = rel.x;
     }
@@ -379,7 +439,7 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
         g_newRunPending = false;
         if (g_cur.pts.size() >= 5) { g_runs.push_back(std::move(g_cur)); if (g_runs.size() > 6) g_runs.erase(g_runs.begin()); }
         g_cur = Run{};
-        g_events.clear(); g_pending.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
+        g_events.clear(); g_pending.clear(); g_reserved.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
         g_havePrevState = false; g_pendPress = g_pendRelease = false;
     }
     g_lastX = x;
@@ -400,11 +460,20 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             auto p = g_pending[i];
             g_pending.erase(g_pending.begin() + i);
             if (p.idx >= g_gimmicks.size()) continue;
-            if (!routeMatches(g_gimmicks[p.idx], p.at, tol)) {
+            if (!routeMatches(g_gimmicks[p.idx], p.at, tol, p.up)) {
                 Notification::create("Gimmick skipped: your route differs from the saved route", NotificationIcon::Warning, 1.f)->show();
                 continue;
             }
-            int removed = pasteGimmick(lel, g_gimmicks[p.idx], ccp(p.at.x + g_gimmicks[p.idx].off.x, p.at.y + g_gimmicks[p.idx].off.y), p.stretch);
+            {
+                float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
+                Span sp = gimmickSpan(g_gimmicks[p.idx], p.at, p.stretch);
+                float gap = nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco"));
+                if (gap < spacing) {
+                    Notification::create(fmt::format("Gimmick skipped: not enough room (nearest object {:.0f} units away, need {:.0f})", gap, spacing), NotificationIcon::Warning, 1.f)->show();
+                    continue;
+                }
+            }
+            int removed = pasteGimmick(lel, g_gimmicks[p.idx], p.at, p.stretch, p.up);
             Notification::create(removed ? fmt::format("Gimmick pasted ({} object(s) left out: they touched your route)", removed) : std::string("Gimmick pasted"), NotificationIcon::Success, 1.f)->show();
         } else i++;
     }

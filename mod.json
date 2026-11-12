@@ -5,7 +5,7 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.6.0",
+	"version": "v1.8.0",
 	"developer": "user",
 	"description": "Place objects during editor playtest; save gimmicks together with your latest playtest route, and paste them automatically when your click effects and route match the saved route.",
 	"tags": [
@@ -50,6 +50,20 @@
 			"min": 0.0,
 			"max": 1500.0
 		},
+		"spacing": {
+			"name": "Object spacing (units)",
+			"description": "A gimmick is only pasted when the nearest other object in front of and behind it is at least this far away in X (a block is 30). Objects it would overlap in X count as 0.",
+			"type": "float",
+			"default": 30.0,
+			"min": 0.0,
+			"max": 600.0
+		},
+		"spacing-deco": {
+			"name": "Spacing: include decoration",
+			"description": "Also keep the spacing from decoration objects (off = only gameplay objects count).",
+			"type": "bool",
+			"default": false
+		},
 		"stretch": {
 			"name": "Vary spacing",
 			"description": "Randomly stretch or squeeze a pasted gimmick horizontally (80% to 120%). Off = pasted exactly as saved.",
@@ -64,7 +78,7 @@
 		},
 		"safety-margin": {
 			"name": "Safety margin (units)",
-			"description": "Blocks and spikes of a pasted gimmick that come closer than this to your route (with your current hitbox: normal, mini, wave, mini wave) are left out.",
+			"description": "Spikes and slopes of a pasted gimmick that come closer than this to your route (with your current hitbox: normal, mini, wave, mini wave) are left out, and so are blocks your route runs into. Blocks you stand on or land on (touching your route from above or below) are kept.",
 			"type": "float",
 			"default": 3.0,
 			"min": 0.0,
