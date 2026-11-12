@@ -322,7 +322,10 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     if (debugOn()) Notification::create(fmt::format("effect: {} ({}{})", type, ev.mode, ev.mini ? ", mini" : ""), NotificationIcon::None, 0.5f)->show();
 
     if (!Mod::get()->getSettingValue<bool>("auto-paste")) return;
-    float window = static_cast<float>(Mod::get()->getSettingValue<double>("window"));
+    // The effect window is set in FRAMES; the frame rate setting converts it to seconds.
+    float fps = static_cast<float>(std::max<int64_t>(1, Mod::get()->getSettingValue<int64_t>("fps")));
+    float windowFrames = static_cast<float>(Mod::get()->getSettingValue<int64_t>("window-frames"));
+    float window = windowFrames / fps;
     float gap = static_cast<float>(Mod::get()->getSettingValue<double>("min-gap"));
     float chance = static_cast<float>(Mod::get()->getSettingValue<double>("chance"));
     size_t best = 0; std::vector<size_t> cands;
@@ -335,7 +338,7 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
         if (!ok) continue;
         auto& first = g_events[off];
         if (first.mode != g.mode || first.mini != g.mini) { dbgNote(fmt::format("Gimmick #{} not used: mode differs (saved {}{}, now {}{})", i + 1, g.mode, g.mini ? " mini" : "", first.mode, first.mini ? " mini" : "")); continue; }
-        if (g_events.back().t - first.t > window) { dbgNote(fmt::format("Gimmick #{} not used: effects took longer than the Effect window", i + 1)); continue; }
+        if (g_events.back().t - first.t > window) { dbgNote(fmt::format("Gimmick #{} not used: effects took {:.0f} frames, the Effect window is {:.0f}", i + 1, (g_events.back().t - first.t) * fps, windowFrames)); continue; }
         if (first.pos.x - g_lastPlacedX < gap) { dbgNote(fmt::format("Gimmick #{} not used: too close to the previous gimmick (Minimum gap)", i + 1)); continue; }
         if (first.pos.x >= g.x0 - g.off.x - 20.f && first.pos.x <= g.x1 + 60.f) continue;   // that is the original gimmick itself
         if (n > best) { best = n; cands.clear(); }

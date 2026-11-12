@@ -5,7 +5,7 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.8.0",
+	"version": "v1.9.0",
 	"developer": "user",
 	"description": "Place objects during editor playtest; save gimmicks together with your latest playtest route, and paste them automatically when your click effects and route match the saved route.",
 	"tags": [
@@ -27,13 +27,21 @@
 			"default": true,
 			"description": "Paste saved gimmicks during a playtest when your clicks match."
 		},
-		"window": {
-			"name": "Effect window (seconds)",
-			"description": "All click effects of a gimmick must happen within this time.",
-			"type": "float",
-			"default": 2.0,
-			"min": 0.2,
-			"max": 8.0
+		"window-frames": {
+			"name": "Effect window (frames)",
+			"description": "All click effects of a gimmick must happen within this many frames of each other (1 frame = 1 / Frame rate seconds).",
+			"type": "int",
+			"default": 120,
+			"min": 1,
+			"max": 1200
+		},
+		"fps": {
+			"name": "Frame rate (fps)",
+			"description": "How many frames per second 'frames' mean in the settings. 60 = normal GD frames; use your game's FPS / TPS if you count frames at another rate.",
+			"type": "int",
+			"default": 60,
+			"min": 10,
+			"max": 480
 		},
 		"chance": {
 			"name": "Paste chance",
