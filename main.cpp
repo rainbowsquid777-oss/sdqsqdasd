@@ -38,6 +38,7 @@ static void announce(char const* prefix) {
 
 // Everything created while an editor playtest runs (by this mod or others such as Auto Layout).
 static std::vector<Ref<GameObject>> g_created;
+static std::vector<Ref<GameObject>> g_hidden;   // orbs pasted by the gimmick system: kept invisible during playtests (setting "hide-orbs")
 
 // ======================= Gimmicks =======================
 // 1. Playtest through the part of the level where you want the gimmick. The mod keeps the route you flew and the
@@ -350,6 +351,7 @@ static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, flo
     for (auto o : objs) if (std::find(bad.begin(), bad.end(), o) == bad.end()) {
         g_created.push_back(o);
         if (keptOut) keptOut->push_back(o);
+        if (phase != 2 && isClickObject(o) && g_hidden.size() < 20000 && Mod::get()->getSettingValue<bool>("hide-orbs")) g_hidden.push_back(o);
     }
     return static_cast<int>(bad.size());
 }
@@ -359,6 +361,7 @@ static void removeList(LevelEditorLayer* lel, std::vector<Ref<GameObject>>& list
         GameObject* o = r.data();
         if (!o) continue;
         g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& q) { return q.data() == o; }), g_created.end());
+        g_hidden.erase(std::remove_if(g_hidden.begin(), g_hidden.end(), [o](Ref<GameObject> const& q) { return q.data() == o; }), g_hidden.end());
         if (lel) lel->removeObject(o, true);
     }
     list.clear();
@@ -587,7 +590,7 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
         g_newRunPending = false;
         if (g_cur.pts.size() >= 5) { g_runs.push_back(std::move(g_cur)); if (g_runs.size() > 6) g_runs.erase(g_runs.begin()); }
         g_cur = Run{};
-        g_events.clear(); for (auto& pp : g_pending) removeEarly(lel, pp); g_pending.clear(); for (auto& pr : g_pred) removeList(lel, pr.early); g_pred.clear(); g_reserved.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
+        g_events.clear(); g_pending.clear(); for (auto& pr : g_pred) removeList(lel, pr.early); g_pred.clear(); g_reserved.clear(); g_lastPlacedX = -1e9f; g_path.clear(); g_pts.clear(); g_hasPrev = false;
         g_havePrevState = false; g_pendPress = g_pendRelease = false;
     }
     g_lastX = x;
@@ -620,8 +623,7 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             if (p.idx >= g_gimmicks.size()) { removeEarly(lel, p); continue; }
             float dAvg = 0.f, dMax = 0.f; int dN = 0;
             if (!routeMatches(g_gimmicks[p.idx], p.at, tol, p.up, &dAvg, &dMax, &dN)) {
-                releaseReserved(p.sp);
-                removeEarly(lel, p);
+                releaseReserved(p.sp);   // the orb of a successful click stays
                 if (dN < 5) Notification::create(fmt::format("Gimmick #{} skipped: too little of your route overlaps the saved route ({} points)", p.idx + 1, dN), NotificationIcon::Warning, 1.5f)->show();
                 else Notification::create(fmt::format("Gimmick #{} skipped: route differs (avg {:.0f} / max {:.0f}, allowed {:.0f} / {:.0f})", p.idx + 1, dAvg, dMax, tol, tol * 3.f), NotificationIcon::Warning, 1.5f)->show();
                 continue;
@@ -632,7 +634,6 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
                 float gap = nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco"), &p.early);
                 if (gap < spacing) {
                     releaseReserved(p.sp);
-                    removeEarly(lel, p);
                     Notification::create(fmt::format("Gimmick #{} skipped: not enough room (nearest object {:.0f} units away, need {:.0f})", p.idx + 1, gap, spacing), NotificationIcon::Warning, 1.5f)->show();
                     continue;
                 }
@@ -699,13 +700,15 @@ class $modify(PlacerEditorUI, EditorUI) {
         bool playing = lel && lel->m_playbackMode == PlaybackMode::Playing;
         if (!playing && g_wasPlaying) {   // playtest ended: the next one starts a new attempt
             g_newRunPending = true;
-            for (auto& pp : g_pending) removeEarly(lel, pp);   // gimmicks that were never confirmed: take their orbs back
+            // orbs of clicks that worked stay in the level; only orbs nobody clicked (g_pred) are taken back
             g_pending.clear(); for (auto& pr : g_pred) removeList(lel, pr.early); g_pred.clear(); g_reserved.clear();
         }
         g_wasPlaying = playing;
         if (!playing) return;
-        if (!Mod::get()->getSettingValue<bool>("show-generated")) return;
-        for (auto& o : g_created) if (o) o->setVisible(true);
+        if (Mod::get()->getSettingValue<bool>("show-generated"))
+            for (auto& o : g_created) if (o) o->setVisible(true);
+        if (Mod::get()->getSettingValue<bool>("hide-orbs"))
+            for (auto& o : g_hidden) if (o) o->setVisible(false);
     }
     bool init(LevelEditorLayer* editorLayer) {
         if (!EditorUI::init(editorLayer)) return false;
