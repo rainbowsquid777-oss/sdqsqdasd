@@ -86,7 +86,7 @@
 		},
 		"marker-start-id": {
 			"name": "Start marker object ID",
-			"description": "Object ID of the START marker block (default 3600 = Empty trigger, does nothing in a level). Place it before a gimmick; only the route from here to the END marker is saved.",
+			"description": "Object ID of the START marker block (default 3600 = Empty trigger, does nothing in a level). Place it before a gimmick; only the route from here to the next marker to its right is saved.",
 			"type": "int",
 			"default": 3600,
 			"min": 1,
