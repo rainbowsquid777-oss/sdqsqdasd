@@ -521,9 +521,14 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     if (objs.empty() && ui->m_selectedObject) objs.push_back(ui->m_selectedObject);
     int idS = static_cast<int>(Mod::get()->getSettingValue<int64_t>("marker-start-id"));
     int idE = static_cast<int>(Mod::get()->getSettingValue<int64_t>("marker-end-id"));
+    std::vector<float> selM;   // marker blocks that are part of the selection
     {   // the marker blocks themselves are never part of a gimmick
         std::vector<GameObject*> real;
-        for (auto o : objs) if (o && o->m_objectID != idS && o->m_objectID != idE) real.push_back(o);
+        for (auto o : objs) {
+            if (!o) continue;
+            if (o->m_objectID == idS || o->m_objectID == idE) selM.push_back(o->getPositionX());
+            else real.push_back(o);
+        }
         objs = real;
     }
     if (objs.empty()) {
@@ -557,13 +562,21 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
         }
         std::sort(xsM.begin(), xsM.end());
     }
-    // START: the nearest marker at or before the first object; if there is none, the first one that lies inside the gimmick.
-    for (float x : xsM) if (x <= minX + 0.5f && (!hasS || x > mS)) { mS = x; hasS = true; }
-    if (!hasS) for (float x : xsM) if (x <= maxX + 0.5f) { mS = x; hasS = true; break; }
-    // END: the next marker to the right of the start marker (it may lie anywhere after it, even before the last object).
-    if (hasS) for (float x : xsM) if (x > mS + 0.5f) { mE = x; hasE = true; break; }
+    if (selM.size() >= 2) {
+        // Markers that you SELECTED together with the gimmick are used as they are: leftmost = start, rightmost = end.
+        mS = *std::min_element(selM.begin(), selM.end()); mE = *std::max_element(selM.begin(), selM.end());
+        hasS = hasE = mE > mS + 0.5f;
+    } else {
+        // START: the nearest marker at or before the first object; if there is none, the first one that lies inside the gimmick.
+        for (float x : xsM) if (x <= minX + 0.5f && (!hasS || x > mS)) { mS = x; hasS = true; }
+        if (!hasS) for (float x : xsM) if (x <= maxX + 0.5f) { mS = x; hasS = true; break; }
+        // END: the next marker to the right of the start marker (it may lie anywhere after it, even before the last object).
+        if (hasS) for (float x : xsM) if (x > mS + 0.5f) { mE = x; hasE = true; break; }
+    }
     if (!xsM.empty() && !(hasS && hasE)) {
-        FLAlertLayer::create("Layout Placer", fmt::format("Marker problem: found {} marker block(s) (object IDs {} / {}), but a gimmick needs a START marker at or before its first object and a second marker to the right of it as the END.\n\nPlace them with Q/E + R in a playtest (\"Gimmick START marker\" / \"Gimmick END marker\"), or change the marker object IDs in the mod settings to the objects you placed.", xsM.size(), idS, idE).c_str(), "OK")->show();
+        std::string where;
+        for (size_t i = 0; i < xsM.size() && i < 10; i++) where += fmt::format("{}{:.0f}", i ? ", " : "", xsM[i]);
+        FLAlertLayer::create("Layout Placer", fmt::format("Marker problem: found {} marker block(s) (object IDs {} / {}), but a gimmick needs a START marker at or before its first object and a second marker to the right of it as the END.\n\nPlace them with Q/E + R in a playtest (\"Gimmick START marker\" / \"Gimmick END marker\"), or change the marker object IDs in the mod settings to the objects you placed.\n\nMarkers found at X: {}\nTip: select the two markers together with the gimmick and press Save; then exactly those two markers are used.", xsM.size(), idS, idE, where).c_str(), "OK")->show();
         return;
     }
     bool useMarkers = hasS && hasE;
