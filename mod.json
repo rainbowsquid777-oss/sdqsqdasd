@@ -5,7 +5,7 @@
 	},
 	"id": "user.layoutplacer",
 	"name": "Layout Placer",
-	"version": "v1.12.0",
+	"version": "v1.13.0",
 	"developer": "user",
 	"description": "Place objects during editor playtest; save gimmicks together with your latest playtest route, and paste them automatically when your click effects and route match the saved route.",
 	"tags": [
@@ -72,12 +72,6 @@
 			"type": "bool",
 			"default": false
 		},
-		"stretch": {
-			"name": "Vary spacing",
-			"description": "Randomly stretch or squeeze a pasted gimmick horizontally (80% to 120%). Off = pasted exactly as saved.",
-			"type": "bool",
-			"default": false
-		},
 		"predict-orbs": {
 			"name": "Place orbs ahead",
 			"description": "While you fall along a route that looks like the start of a saved gimmick, place its orb ahead of you and wait. If you click it the gimmick goes on; if you do not, you fly past and the orb is removed.",
@@ -87,6 +81,42 @@
 		"hide-orbs": {
 			"name": "Hide placed orbs",
 			"description": "Orbs placed by gimmicks are invisible during playtests (they still work). In the editor view they are shown again so you can find and edit them.",
+			"type": "bool",
+			"default": true
+		},
+		"marker-start-id": {
+			"name": "Start marker object ID",
+			"description": "Object ID of the START marker block (default 3600 = Empty trigger, does nothing in a level). Place it before a gimmick; only the route from here to the END marker is saved.",
+			"type": "int",
+			"default": 3600,
+			"min": 1,
+			"max": 9999
+		},
+		"marker-end-id": {
+			"name": "End marker object ID",
+			"description": "Object ID of the END marker block (default 1007 = Alpha trigger without a target group, does nothing). Place it after the gimmick.",
+			"type": "int",
+			"default": 1007,
+			"min": 1,
+			"max": 9999
+		},
+		"match-timing": {
+			"name": "Match click timing",
+			"description": "The clicks of a gimmick (their number is always matched) must also come at about the same distances after each other as when it was saved.",
+			"type": "bool",
+			"default": true
+		},
+		"timing-tolerance": {
+			"name": "Click timing tolerance (units)",
+			"description": "How far a click may be from its saved position (measured from the first click) and still match.",
+			"type": "float",
+			"default": 45.0,
+			"min": 5.0,
+			"max": 300.0
+		},
+		"allow-passable": {
+			"name": "Paste when passable",
+			"description": "If your route is NOT similar to the saved route, still paste the gimmick when none of its objects is in the way of the route you flew (with your current hitbox). Off = only paste on a similar route.",
 			"type": "bool",
 			"default": true
 		},

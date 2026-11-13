@@ -28,6 +28,7 @@ static const Item ITEMS[] = {
     {"Mirror on", 45, false}, {"Mirror off", 46, false},
     {"Speed 0.5x", 200, false}, {"Speed 1x", 201, false}, {"Speed 2x", 202, false},
     {"Speed 3x", 203, false}, {"Speed 4x", 1334, false},
+    {"Gimmick START marker", -1, false}, {"Gimmick END marker", -2, false},   // ids come from the settings
 };
 static constexpr int COUNT = sizeof(ITEMS) / sizeof(ITEMS[0]);
 static int g_sel = 0;
@@ -54,7 +55,8 @@ struct Gimmick {
     std::string mode = "cube";
     bool mini = false;
     bool up = false;                  // gravity was upside down when it was saved (everything below is stored gravity-relative)
-    std::vector<std::string> types;   // effect sequence: kick, flip, hold, release
+    std::vector<std::string> types;   // effect sequence: kick, flip, hold, release (= number of effects = number of counted clicks)
+    std::vector<float> evx;           // X distance of every effect from the first one (click timing); empty in gimmicks saved by older versions
     float width = 30.f, x0 = 0.f, x1 = 0.f, ay = 0.f;
     CCPoint off = ccp(0.f, 0.f);      // leftmost object relative to the first click effect (y is gravity-relative)
     std::vector<CCPoint> route;       // saved route (player centre) relative to the first effect (y is gravity-relative)
@@ -73,17 +75,20 @@ static std::vector<std::string> splitStr(std::string const& s, char d) {
 static void storeGimmicks() {
     std::string out;
     for (auto& g : g_gimmicks) {
-        std::string types, route;
+        std::string types, route, evx;
         for (size_t i = 0; i < g.types.size(); i++) types += (i ? "," : "") + g.types[i];
+        for (size_t i = 0; i < g.evx.size(); i++) evx += fmt::format("{}{:.1f}", i ? "," : "", g.evx[i]);
         for (auto& p : g.route) route += fmt::format("{:.1f},{:.1f};", p.x, p.y);
-        out += fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n", g.verified ? 1 : 0, g.mode, g.mini ? 1 : 0, g.up ? 1 : 0, types, g.width, g.x0, g.x1, g.ay, g.off.x, g.off.y, route, g.data);
+        out += fmt::format("{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}\n", g.verified ? 1 : 0, g.mode, g.mini ? 1 : 0, g.up ? 1 : 0, types, evx, g.width, g.x0, g.x1, g.ay, g.off.x, g.off.y, route, g.data);
     }
-    Mod::get()->setSavedValue<std::string>("gimmicks4", out);
+    Mod::get()->setSavedValue<std::string>("gimmicks5", out);
+    Mod::get()->setSavedValue<std::string>("gimmicks4", "");   // older formats are replaced by this one
+    Mod::get()->setSavedValue<std::string>("gimmicks3", "");
 }
-static void parseGimmicks(std::string const& text, bool hasUp) {
+static void parseGimmicks(std::string const& text, int ver) {   // ver 3: no gravity, 4: gravity, 5: gravity + click timing
     std::istringstream in(text);
     std::string line;
-    int nf = hasUp ? 12 : 11;
+    int nf = ver >= 5 ? 13 : (ver == 4 ? 12 : 11);
     while (std::getline(in, line)) {
         std::vector<std::string> f; size_t st = 0;
         for (int i = 0; i < nf; i++) { auto e = line.find('|', st); if (e == std::string::npos) break; f.push_back(line.substr(st, e - st)); st = e + 1; }
@@ -91,8 +96,9 @@ static void parseGimmicks(std::string const& text, bool hasUp) {
         size_t k = 0;
         Gimmick g;
         g.verified = f[k++] == "1"; g.mode = f[k++]; g.mini = f[k++] == "1";
-        if (hasUp) g.up = f[k++] == "1";
+        if (ver >= 4) g.up = f[k++] == "1";
         for (auto& t : splitStr(f[k++], ',')) if (!t.empty()) g.types.push_back(t);
+        if (ver >= 5) for (auto& t : splitStr(f[k++], ',')) if (!t.empty()) g.evx.push_back(static_cast<float>(std::atof(t.c_str())));
         g.width = static_cast<float>(std::atof(f[k++].c_str()));
         g.x0 = static_cast<float>(std::atof(f[k++].c_str()));
         g.x1 = static_cast<float>(std::atof(f[k++].c_str()));
@@ -111,9 +117,11 @@ static void parseGimmicks(std::string const& text, bool hasUp) {
 }
 static void loadGimmicks() {
     g_gimmicks.clear();
-    auto cur = Mod::get()->getSavedValue<std::string>("gimmicks4", "");
-    if (!cur.empty()) { parseGimmicks(cur, true); return; }
-    parseGimmicks(Mod::get()->getSavedValue<std::string>("gimmicks3", ""), false);   // saved by an older version (gravity down)
+    auto v5 = Mod::get()->getSavedValue<std::string>("gimmicks5", "");
+    if (!v5.empty()) { parseGimmicks(v5, 5); return; }
+    auto v4 = Mod::get()->getSavedValue<std::string>("gimmicks4", "");
+    if (!v4.empty()) { parseGimmicks(v4, 4); return; }
+    parseGimmicks(Mod::get()->getSavedValue<std::string>("gimmicks3", ""), 3);   // saved by an older version (gravity down)
 }
 $execute { loadGimmicks(); }
 
@@ -307,7 +315,7 @@ static bool routeMatches(Gimmick const& g, CCPoint e0, float tol, bool curUp, fl
 }
 
 // phase 1 = only the click-activated objects (orbs), phase 2 = everything except them, 0 = everything.
-static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, float stretch, bool curUp, int phase = 0, std::vector<Ref<GameObject>>* keptOut = nullptr) {
+static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, float stretch, bool curUp, int phase = 0, std::vector<Ref<GameObject>>* keptOut = nullptr, bool allOrNothing = false) {
     if (!lel->m_editorUI) return 0;
     auto arr = lel->createObjectsFromString(g.data, true, false);
     if (!arr || arr->count() == 0) return 0;
@@ -344,6 +352,13 @@ static int pasteGimmick(LevelEditorLayer* lel, Gimmick const& g, CCPoint e0, flo
     float margin = static_cast<float>(Mod::get()->getSettingValue<double>("safety-margin"));
     std::vector<GameObject*> bad;
     if (phase != 1) for (auto o : objs) if (blocksPath(o, margin)) bad.push_back(o);
+    if (allOrNothing && !bad.empty()) {   // the gimmick is never changed: either it goes in exactly as saved, or not at all
+        for (auto o : objs) {
+            g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& r) { return r.data() == o; }), g_created.end());
+            lel->removeObject(o, true);
+        }
+        return static_cast<int>(bad.size());
+    }
     for (auto o : bad) {
         g_created.erase(std::remove_if(g_created.begin(), g_created.end(), [o](Ref<GameObject> const& r) { return r.data() == o; }), g_created.end());
         lel->removeObject(o, true);
@@ -382,6 +397,8 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     float window = windowFrames / fps;
     float gap = static_cast<float>(Mod::get()->getSettingValue<double>("min-gap"));
     float chance = static_cast<float>(Mod::get()->getSettingValue<double>("chance"));
+    bool matchTiming = Mod::get()->getSettingValue<bool>("match-timing");
+    float timingTol = static_cast<float>(Mod::get()->getSettingValue<double>("timing-tolerance"));
     size_t best = 0; std::vector<size_t> cands;
     for (size_t i = 0; i < g_gimmicks.size(); i++) {
         auto& g = g_gimmicks[i];
@@ -392,6 +409,11 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
         if (!ok) continue;
         auto& first = g_events[off];
         if (first.mode != g.mode || first.mini != g.mini) { dbgNote(fmt::format("Gimmick #{} not used: mode differs (saved {}{}, now {}{})", i + 1, g.mode, g.mini ? " mini" : "", first.mode, first.mini ? " mini" : "")); continue; }
+        if (matchTiming && g.evx.size() == n) {   // click timing: every effect must come at about the same distance after the first one as when it was saved
+            bool tOk = true;
+            for (size_t k = 1; k < n; k++) if (std::fabs((g_events[off + k].pos.x - first.pos.x) - g.evx[k]) > timingTol) { tOk = false; break; }
+            if (!tOk) { dbgNote(fmt::format("Gimmick #{} not used: click timing differs from the saved gimmick", i + 1)); continue; }
+        }
         if (g_events.back().t - first.t > window) { dbgNote(fmt::format("Gimmick #{} not used: effects took {:.0f} frames, the Effect window is {:.0f}", i + 1, (g_events.back().t - first.t) * fps, windowFrames)); continue; }
         if (first.pos.x - g_lastPlacedX < gap) { dbgNote(fmt::format("Gimmick #{} not used: too close to the previous gimmick (Minimum gap)", i + 1)); continue; }
         if (first.pos.x >= g.x0 - g.off.x - 20.f && first.pos.x <= g.x1 + 60.f) continue;   // that is the original gimmick itself
@@ -417,7 +439,7 @@ static void onEffect(PlayerObject* pl, std::string const& type) {
     size_t idx = cands[static_cast<size_t>(rnd() * cands.size()) % cands.size()];
     auto& g = g_gimmicks[idx];
     auto first = g_events[g_events.size() - g.types.size()];
-    float stretch = Mod::get()->getSettingValue<bool>("stretch") ? 0.9f + 0.2f * rnd() : 1.f;
+    float stretch = 1.f;   // saved gimmicks are never stretched or changed
     float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
     Span sp = gimmickSpan(g, first.pos, stretch);
     for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) { dbgNote(fmt::format("Gimmick #{} not used: would overlap another gimmick of this run", idx + 1)); return; }
@@ -477,7 +499,7 @@ static void tryPredict(LevelEditorLayer* lel, PlayerObject* pl) {
     if (bestE0.x >= g.x0 - g.off.x - 20.f && bestE0.x <= g.x1 + 60.f) return;   // that is the original gimmick itself
     if (bestE0.x - g_lastPlacedX < gap) return;
     if (rnd() > chance) { g_pred.push_back({bestIdx, bestE0, 1.f, up, {0.f, 0.f}, {}}); g_pred.back().idx = static_cast<size_t>(-1); return; }   // remember the "no" for this fall
-    float stretch = Mod::get()->getSettingValue<bool>("stretch") ? 0.9f + 0.2f * rnd() : 1.f;
+    float stretch = 1.f;
     Span sp = gimmickSpan(g, bestE0, stretch);
     for (auto& r : g_reserved) if (sp.l - spacing < r.r && sp.r + spacing > r.l) return;
     if (nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco")) < spacing) return;
@@ -497,6 +519,13 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
         for (unsigned i = 0; i < sel->count(); i++) objs.push_back(static_cast<GameObject*>(sel->objectAtIndex(i)));
     }
     if (objs.empty() && ui->m_selectedObject) objs.push_back(ui->m_selectedObject);
+    int idS = static_cast<int>(Mod::get()->getSettingValue<int64_t>("marker-start-id"));
+    int idE = static_cast<int>(Mod::get()->getSettingValue<int64_t>("marker-end-id"));
+    {   // the marker blocks themselves are never part of a gimmick
+        std::vector<GameObject*> real;
+        for (auto o : objs) if (o && o->m_objectID != idS && o->m_objectID != idE) real.push_back(o);
+        objs = real;
+    }
     if (objs.empty()) {
         FLAlertLayer::create("Layout Placer", "Nothing selected. Select the objects of your gimmick first, then press Save.", "OK")->show();
         return;
@@ -515,8 +544,32 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
         return;
     }
 
-    // The most recent playtest route that flew through all selected objects.
-    auto passes = [&](Run const& r) { return r.pts.size() >= 5 && r.pts.front().x <= minX && r.pts.back().x >= maxX + 30.f; };
+    // Marker blocks: the START marker at or before the first object and the END marker at or after the last one.
+    // When both exist, ONLY the route (and the clicks) from the start marker's X to the end marker's X are saved.
+    float mS = 0.f, mE = 0.f; bool hasS = false, hasE = false;
+    if (lel->m_objects) {
+        for (unsigned i = 0; i < lel->m_objects->count(); i++) {
+            auto o = static_cast<GameObject*>(lel->m_objects->objectAtIndex(i));
+            if (!o || o->m_objectID != idS) continue;
+            float x = o->getPositionX();
+            if (x <= minX + 0.5f && (!hasS || x > mS)) { mS = x; hasS = true; }
+        }
+        for (unsigned i = 0; i < lel->m_objects->count(); i++) {
+            auto o = static_cast<GameObject*>(lel->m_objects->objectAtIndex(i));
+            if (!o || o->m_objectID != idE) continue;
+            float x = o->getPositionX();
+            if (x >= maxX - 0.5f && (!hasS || x > mS + 0.5f) && (!hasE || x < mE)) { mE = x; hasE = true; }
+        }
+    }
+    if (hasS != hasE) {
+        FLAlertLayer::create("Layout Placer", hasS ? "Found a START marker but no END marker after the gimmick. Place the END marker (Q/E in a playtest: \"Gimmick END marker\") at the X where the saved route should stop." : "Found an END marker but no START marker before the gimmick. Place the START marker (Q/E in a playtest: \"Gimmick START marker\") at the X where the saved route should begin.", "OK")->show();
+        return;
+    }
+    bool useMarkers = hasS && hasE;
+    float rangeL = useMarkers ? mS : minX, rangeR = useMarkers ? mE : maxX + 30.f;
+
+    // The most recent playtest route that flew through the whole range.
+    auto passes = [&](Run const& r) { return r.pts.size() >= 5 && r.pts.front().x <= rangeL && r.pts.back().x >= rangeR; };
     Run const* run = nullptr;
     if (passes(g_cur)) run = &g_cur;
     else for (auto it = g_runs.rbegin(); it != g_runs.rend(); ++it) if (passes(*it)) { run = &*it; break; }
@@ -528,15 +581,20 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     // Click effects that belong to this gimmick: from a little before the first object up to the last object.
     float lead = static_cast<float>(Mod::get()->getSettingValue<double>("lead-in"));
     std::vector<Ev> evs;
-    for (auto& e : run->evs) if (e.pos.x >= minX - lead && e.pos.x <= maxX) evs.push_back(e);
+    if (useMarkers) { for (auto& e : run->evs) if (e.pos.x >= mS && e.pos.x <= mE) evs.push_back(e); }   // every click effect between the markers
+    else for (auto& e : run->evs) if (e.pos.x >= minX - lead && e.pos.x <= maxX) evs.push_back(e);
     // Nothing inside the lead-in range: the effect that STARTED this trajectory (the fall that ends on the block, the
     // jump that began further back, ...) is the latest effect before the objects, so use that one.
     float usedBack = 0.f;
-    if (evs.empty()) {
+    if (evs.empty() && !useMarkers) {
         float maxBack = std::max(600.f, lead);
         Ev const* best = nullptr;
         for (auto& e : run->evs) if (e.pos.x < minX - lead && e.pos.x >= minX - maxBack && (!best || e.pos.x > best->pos.x)) best = &e;
         if (best) { evs.push_back(*best); usedBack = minX - best->pos.x; }
+    }
+    if (evs.empty() && useMarkers) {
+        FLAlertLayer::create("Layout Placer", fmt::format("Your latest route has no click effect (jump, gravity flip, wave hold/release, ship hold, fall) between the START and END marker.\n\nIn that run: {} click(s), {} effect(s) in total.", run->presses, run->evs.size()).c_str(), "OK")->show();
+        return;
     }
     if (evs.empty()) {
         FLAlertLayer::create("Layout Placer", fmt::format("Your latest route through these objects has no click effect (jump, gravity flip, wave hold/release, ship hold, fall) within {:.0f} units before the first object, or inside the objects.\n\nIn that run: {} click(s), {} effect(s) in total.", std::max(600.f, lead), run->presses, run->evs.size()).c_str(), "OK")->show();
@@ -548,12 +606,12 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     g.width = maxX - minX + 30.f; g.x0 = minX; g.x1 = maxX; g.ay = anchorY; g.data = data;
     g.mode = e0.mode; g.mini = e0.mini; g.up = e0.up;
     float sg = g.up ? -1.f : 1.f;   // store everything gravity-relative
-    for (auto& e : evs) g.types.push_back(e.type);
+    for (auto& e : evs) { g.types.push_back(e.type); g.evx.push_back(e.pos.x - e0.pos.x); }   // number of clicks + their timing
     g.off = ccp(g.x0 - e0.pos.x, sg * (g.ay - e0.pos.y));
     float lastX = -1e9f;
     for (auto& p : run->pts) {
         CCPoint rel = p - e0.pos; rel.y *= sg;
-        if (rel.x < -30.f || p.x > maxX + 60.f || rel.x - lastX < 2.f) continue;
+        if (useMarkers ? (p.x < mS || p.x > mE || rel.x - lastX < 2.f) : (rel.x < -30.f || p.x > maxX + 60.f || rel.x - lastX < 2.f)) continue;
         g.route.push_back(rel); lastX = rel.x;
     }
     if (g.route.size() < 3) {
@@ -564,7 +622,7 @@ static void saveSelectionAsGimmick(EditorUI* ui) {
     size_t nEff = g.types.size();
     g_gimmicks.push_back(std::move(g));
     storeGimmicks();
-    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as gimmick #{} together with your latest route ({} effect(s){}).\n\nIt is pasted automatically when your effects and route match this route.", count, g_gimmicks.size(), nEff, usedBack > 0.f ? fmt::format(", started {:.0f} units before the objects", usedBack) : std::string()).c_str(), "OK")->show();
+    FLAlertLayer::create("Gimmick saved", fmt::format("Saved {} object(s) as gimmick #{} with {} click effect(s) and their timing{}.\n\nIt is pasted when the same effects happen (in the same timing) and your route is similar - or, if it is not, when the gimmick can still be passed. It is always pasted exactly as saved.", count, g_gimmicks.size(), nEff, useMarkers ? fmt::format(", route saved only between the markers ({:.0f} units)", mE - mS) : (usedBack > 0.f ? fmt::format(", started {:.0f} units before the objects", usedBack) : std::string())).c_str(), "OK")->show();
 }
 
 static void onPlayerPress(PlayerObject* pl) {
@@ -621,8 +679,10 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             auto p = std::move(g_pending[i]);
             g_pending.erase(g_pending.begin() + i);
             if (p.idx >= g_gimmicks.size()) { removeEarly(lel, p); continue; }
+            auto& pg = g_gimmicks[p.idx];
             float dAvg = 0.f, dMax = 0.f; int dN = 0;
-            if (!routeMatches(g_gimmicks[p.idx], p.at, tol, p.up, &dAvg, &dMax, &dN)) {
+            bool matched = routeMatches(pg, p.at, tol, p.up, &dAvg, &dMax, &dN);
+            if (!matched && !Mod::get()->getSettingValue<bool>("allow-passable")) {
                 releaseReserved(p.sp);   // the orb of a successful click stays
                 if (dN < 5) Notification::create(fmt::format("Gimmick #{} skipped: too little of your route overlaps the saved route ({} points)", p.idx + 1, dN), NotificationIcon::Warning, 1.5f)->show();
                 else Notification::create(fmt::format("Gimmick #{} skipped: route differs (avg {:.0f} / max {:.0f}, allowed {:.0f} / {:.0f})", p.idx + 1, dAvg, dMax, tol, tol * 3.f), NotificationIcon::Warning, 1.5f)->show();
@@ -630,7 +690,7 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
             }
             {
                 float spacing = static_cast<float>(Mod::get()->getSettingValue<double>("spacing"));
-                Span sp = gimmickSpan(g_gimmicks[p.idx], p.at, p.stretch);
+                Span sp = gimmickSpan(pg, p.at, p.stretch);
                 float gap = nearestObjectGap(lel, sp, Mod::get()->getSettingValue<bool>("spacing-deco"), &p.early);
                 if (gap < spacing) {
                     releaseReserved(p.sp);
@@ -638,8 +698,15 @@ static void onPlayerUpdate(PlayerObject* pl, float dt) {
                     continue;
                 }
             }
-            int removed = pasteGimmick(lel, g_gimmicks[p.idx], p.at, p.stretch, p.up, p.early.empty() ? 0 : 2);
-            Notification::create(removed ? fmt::format("Gimmick pasted ({} object(s) left out: they touched your route)", removed) : std::string("Gimmick pasted"), NotificationIcon::Success, 1.f)->show();
+            // The route is similar, OR (when it is not) the gimmick is still fine as long as none of its objects is in the way of
+            // the route you flew from its start until now (with your current hitbox). It goes in exactly as saved or not at all.
+            int blocked = pasteGimmick(lel, pg, p.at, 1.f, p.up, p.early.empty() ? 0 : 2, nullptr, true);
+            if (blocked) {
+                releaseReserved(p.sp);
+                Notification::create(fmt::format("Gimmick #{} skipped: {} object(s) would be in your way, so it cannot be passed", p.idx + 1, blocked), NotificationIcon::Warning, 1.5f)->show();
+                continue;
+            }
+            Notification::create(matched ? std::string("Gimmick pasted") : std::string("Gimmick pasted (route differs, but you can pass it)"), NotificationIcon::Success, 1.f)->show();
         } else i++;
     }
 }
@@ -673,9 +740,11 @@ class $modify(PlacerKeys, CCKeyboardDispatcher) {
                 else if (key == KEY_E) { g_sel = (g_sel + 1) % COUNT; announce("Selected"); }
                 else if (key == KEY_R) {
                     auto p = lel->m_player1->getPosition();
-                    p.x += static_cast<float>(Mod::get()->getSettingValue<double>("offset-x"));
+                    if (ITEMS[g_sel].id >= 0) p.x += static_cast<float>(Mod::get()->getSettingValue<double>("offset-x"));   // markers sit exactly at the player
+                    int id = ITEMS[g_sel].id;
+                    if (id < 0) id = static_cast<int>(Mod::get()->getSettingValue<int64_t>(id == -1 ? "marker-start-id" : "marker-end-id"));
                     if (ITEMS[g_sel].pad) p.y -= 9.f;
-                    if (auto o = lel->createObject(ITEMS[g_sel].id, p, false)) g_created.push_back(o);
+                    if (auto o = lel->createObject(id, p, false)) g_created.push_back(o);
                     announce("Placed");
                 }
             }
